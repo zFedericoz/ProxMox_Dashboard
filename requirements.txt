@@ -1,0 +1,1 @@
+# Dipendenze Python - vedi backend/requirements.txt
