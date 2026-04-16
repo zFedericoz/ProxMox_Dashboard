@@ -897,7 +897,7 @@ class ProxmoxCluster:
                         INSERT INTO metrics_snapshots
                         (node_name, node_ip, cpu_usage, mem_used, mem_total,
                          disk_used, disk_total, uptime, load_avg, vm_count, ct_count, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         name, d.get("host", ""),
                         d.get("cpu_usage", 0),
@@ -912,7 +912,7 @@ class ProxmoxCluster:
                 else:
                     host = self.nodes[name].host if name in self.nodes else ""
                     conn.execute(
-                        "INSERT INTO metrics_snapshots (node_name, node_ip, status) VALUES (?, ?, ?)",
+                        "INSERT INTO metrics_snapshots (node_name, node_ip, status) VALUES (%s, %s, %s)",
                         (name, host, "offline")
                     )
             conn.commit()

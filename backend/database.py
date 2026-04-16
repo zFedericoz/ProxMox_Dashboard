@@ -16,11 +16,13 @@ from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 
 # Database connection settings
-DB_HOST = os.environ.get("DB_HOST", "db")
+DB_HOST = os.environ.get("DB_HOST", "syam-proxmox-dashboard-vmdtp.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com")
 DB_PORT = int(os.environ.get("DB_PORT", 5432))
-DB_NAME = os.environ.get("DB_NAME", "proxmox_dashboard")
-DB_USER = os.environ.get("DB_USER", "proxmox")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "proxmox123")
+DB_NAME = os.environ.get("DB_NAME", "postgres")
+DB_USER = os.environ.get("DB_USER", "")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
+DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")
+DB_SSLROOTCERT = os.environ.get("DB_SSLROOTCERT", "")
 
 # Connection pool
 _connection_pool = None
@@ -29,14 +31,21 @@ def init_pool():
     """Initialize connection pool."""
     global _connection_pool
     if _connection_pool is None:
+        connect_kwargs = {
+            "host": DB_HOST,
+            "port": DB_PORT,
+            "database": DB_NAME,
+            "user": DB_USER,
+            "password": DB_PASSWORD,
+            "sslmode": DB_SSLMODE
+        }
+        if DB_SSLROOTCERT:
+            connect_kwargs["sslrootcert"] = DB_SSLROOTCERT
+
         _connection_pool = pool.ThreadedConnectionPool(
             minconn=2,
             maxconn=50,
-            host=DB_HOST,
-            port=DB_PORT,
-            database=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD
+            **connect_kwargs
         )
     return _connection_pool
 

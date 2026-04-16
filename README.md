@@ -6,6 +6,7 @@ Dashboard di monitoraggio per cluster Proxmox con 3 nodi.
 
 - Docker >= 20.10
 - Docker Compose >= 2.0
+- PostgreSQL su AWS RDS raggiungibile (no DB locale)
 
 ## Configurazione
 
@@ -16,18 +17,18 @@ cp .env.example .env
 nano .env
 ```
 
-2. Modifica le variabili:
+2. Modifica almeno queste variabili:
+   - `DB_USER` - utente PostgreSQL RDS
+   - `DB_PASSWORD` - password PostgreSQL RDS
+   - `DB_NAME` - database PostgreSQL RDS
    - `PROXMOX_PASSWORD` - Password del tuo server Proxmox
    - `SECRET_KEY` - Chiave segreta per JWT (cambiala in produzione!)
 
 ## Avvio
 
 ```bash
-# Build e avvio
+# Avvio con immagini ECR (frontend/backend separati)
 docker-compose up -d
-
-# Oppure con build automatico
-docker-compose up --build -d
 ```
 
 La dashboard sarà disponibile su: **http://localhost:8000**
@@ -77,7 +78,13 @@ proxmox-dashboard/
 | Variabile | Descrizione | Default |
 |-----------|-------------|---------|
 | `PORT` | Porta del server | 8000 |
-| `DB_PATH` | Path database | /app/data/dashboard.db |
+| `DB_HOST` | Endpoint AWS RDS PostgreSQL | `syam-progetto-aws-tpmdv.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com` |
+| `DB_PORT` | Porta database | `5432` |
+| `DB_NAME` | Nome database PostgreSQL | `postgres` |
+| `DB_USER` | Utente database PostgreSQL | `(required)` |
+| `DB_PASSWORD` | Password database PostgreSQL | `(required)` |
+| `DB_SSLMODE` | SSL mode connessione | `require` |
+| `DB_SSLROOTCERT` | CA bundle path (opzionale) | vuoto |
 | `PROXMOX_NODES` | Nodi Proxmox (JSON) | 3 nodi default |
 | `PROXMOX_USER` | Utente Proxmox | root@pam |
 | `PROXMOX_PASSWORD` | Password Proxmox | (richiesto) |
@@ -89,5 +96,5 @@ proxmox-dashboard/
 Per produzione, considera:
 - Usare un reverse proxy (Traefik, Caddy)
 - Abilitare HTTPS
-- Usare external volume per il database
+- Database gestito su AWS RDS (no database locale)
 - Impostare CORS_ORIGINS correctly

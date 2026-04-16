@@ -716,13 +716,13 @@ async def get_metrics_history(node: Optional[str] = None, hours: int = 24):
     if node:
         rows = conn.execute("""
             SELECT * FROM metrics_snapshots
-            WHERE node_name = ? AND timestamp >= ?
+            WHERE node_name = %s AND timestamp >= %s
             ORDER BY timestamp DESC LIMIT 500
         """, (node, since)).fetchall()
     else:
         rows = conn.execute("""
             SELECT * FROM metrics_snapshots
-            WHERE timestamp >= ?
+            WHERE timestamp >= %s
             ORDER BY timestamp DESC LIMIT 1000
         """, (since,)).fetchall()
     return {"data": [dict(r) for r in rows]}
@@ -754,12 +754,12 @@ async def get_activity_logs(limit: int = 100, severity: Optional[str] = None):
     conn = get_db()
     if severity:
         rows = conn.execute("""
-            SELECT * FROM activity_log WHERE severity = ?
-            ORDER BY timestamp DESC LIMIT ?
+            SELECT * FROM activity_log WHERE severity = %s
+            ORDER BY timestamp DESC LIMIT %s
         """, (severity, limit)).fetchall()
     else:
         rows = conn.execute("""
-            SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT ?
+            SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT %s
         """, (limit,)).fetchall()
     return {"logs": [dict(r) for r in rows], "count": len(rows)}
 
@@ -767,7 +767,7 @@ async def get_activity_logs(limit: int = 100, severity: Optional[str] = None):
 async def get_access_logs(limit: int = 100):
     conn = get_db()
     rows = conn.execute("""
-        SELECT * FROM access_log ORDER BY timestamp DESC LIMIT ?
+        SELECT * FROM access_log ORDER BY timestamp DESC LIMIT %s
     """, (limit,)).fetchall()
     return {"logs": [dict(r) for r in rows], "count": len(rows)}
 
@@ -953,17 +953,30 @@ async def save_budget_config(request: Request):
         if key in body:
             value = str(body[key])
             conn.execute("""
-                INSERT OR REPLACE INTO cost_config (category, key, value)
-                VALUES ('budget', ?, ?)
+                INSERT INTO cost_config (category, key, value)
+                VALUES ('budget', %s, %s)
+                ON CONFLICT (key) DO UPDATE SET
+                    category = EXCLUDED.category,
+                    value = EXCLUDED.value
             """, (key, value))
     
     if 'nodes' in body:
         for node in body['nodes']:
             enabled = 1 if node.get('enabled', True) else 0
             conn.execute("""
-                INSERT OR REPLACE INTO cost_config_nodes (node_name, tdp_idle_w, tdp_max_w, enabled)
-                VALUES (?, ?, ?, ?)
-            """, (node['name'], config.get('node_tdp_idle_w', 20), config.get('node_tdp_max_w', 65), enabled))
+                INSERT INTO cost_config_nodes (node_name, tdp_idle_w, tdp_max_w, enabled)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (node_name) DO UPDATE SET
+                    tdp_idle_w = EXCLUDED.tdp_idle_w,
+                    tdp_max_w = EXCLUDED.tdp_max_w,
+                    enabled = EXCLUDED.enabled,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (
+                node['name'],
+                float(body.get('node_tdp_idle_w', 20)),
+                float(body.get('node_tdp_max_w', 65)),
+                enabled
+            ))
     
     conn.commit()
     log_activity("admin", "Budget configuration updated", severity="info")
@@ -1029,7 +1042,7 @@ async def update_node_cost_config(node_name: str, request: Request):
 async def get_alerts(resolved: bool = False):
     conn = get_db()
     rows = conn.execute("""
-        SELECT * FROM alerts WHERE resolved = ?
+        SELECT * FROM alerts WHERE resolved = %s
         ORDER BY timestamp DESC LIMIT 100
     """, (1 if resolved else 0,)).fetchall()
 
@@ -1058,7 +1071,7 @@ async def get_alerts(resolved: bool = False):
 async def resolve_alert(alert_id: int, request: Request):
     conn = get_db()
     conn.execute("""
-        UPDATE alerts SET resolved = 1, resolved_at = NOW() WHERE id = ?
+        UPDATE alerts SET resolved = 1, resolved_at = NOW() WHERE id = %s
     """, (alert_id,))
     conn.commit()
     log_activity("admin", f"Alert {alert_id} resolved",
@@ -1088,7 +1101,7 @@ async def create_user(request: Request):
     try:
         conn.execute("""
             INSERT INTO users (username, password_hash, email, role)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
         """, (username, hash_password(password), email, role))
         conn.commit()
         log_activity("admin", f"User created: {username}", severity="info")
@@ -1100,7 +1113,7 @@ async def create_user(request: Request):
 async def get_audit_log(limit: int = 200):
     conn = get_db()
     rows = conn.execute("""
-        SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT ?
+        SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT %s
     """, (limit,)).fetchall()
     return {"audit": [dict(r) for r in rows], "count": len(rows)}
 
@@ -1123,7 +1136,7 @@ async def update_account_profile(request: Request, current_user: dict = Depends(
     username = current_user.get("sub")
     email = body.get("email", "")
     conn = get_db()
-    conn.execute("UPDATE users SET email = ? WHERE username = %s", (email, username))
+    conn.execute("UPDATE users SET email = %s WHERE username = %s", (email, username))
     conn.commit()
     log_activity(username, "Profilo aggiornato", severity="info")
     return {"success": True}
@@ -1148,7 +1161,7 @@ async def change_account_password(request: Request):
         raise HTTPException(status_code=401, detail="Password attuale non corretta")
     
     new_hash = hash_password(new_password)
-    conn.execute("UPDATE users SET password_hash = ? WHERE username = %s", (new_hash, username))
+    conn.execute("UPDATE users SET password_hash = %s WHERE username = %s", (new_hash, username))
     conn.commit()
     log_activity(username, "Password cambiata", severity="info")
     return {"success": True}
@@ -1165,7 +1178,7 @@ async def admin_get_users():
     
     for user in users:
         activity_count = conn.execute("""
-            SELECT COUNT(*) FROM activity_log WHERE user = ?
+            SELECT COUNT(*) FROM activity_log WHERE "user" = %s
         """, (user["username"],)).fetchone()[0]
         user["activity_count"] = activity_count
         
@@ -1175,7 +1188,7 @@ async def admin_get_users():
         user["access_count"] = access_count
         
         last_activity = conn.execute("""
-            SELECT timestamp, action FROM activity_log WHERE user = ? ORDER BY timestamp DESC LIMIT 1
+            SELECT timestamp, action FROM activity_log WHERE "user" = %s ORDER BY timestamp DESC LIMIT 1
         """, (user["username"],)).fetchone()
         user["last_activity"] = dict(last_activity) if last_activity else None
     
@@ -1185,8 +1198,8 @@ async def admin_get_users():
 async def admin_get_user_activity(username: str, limit: int = 50):
     conn = get_db()
     rows = conn.execute("""
-        SELECT * FROM activity_log WHERE user = ?
-        ORDER BY timestamp DESC LIMIT ?
+        SELECT * FROM activity_log WHERE "user" = %s
+        ORDER BY timestamp DESC LIMIT %s
     """, (username, limit)).fetchall()
     return {"activity": [dict(r) for r in rows], "count": len(rows)}
 
@@ -1195,7 +1208,7 @@ async def admin_get_user_access(username: str, limit: int = 50):
     conn = get_db()
     rows = conn.execute("""
         SELECT * FROM access_log WHERE username = %s
-        ORDER BY timestamp DESC LIMIT ?
+        ORDER BY timestamp DESC LIMIT %s
     """, (username, limit)).fetchall()
     return {"access": [dict(r) for r in rows], "count": len(rows)}
 
@@ -1217,7 +1230,7 @@ async def admin_create_user(request: Request):
     try:
         conn.execute("""
             INSERT INTO users (username, password_hash, email, role)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
         """, (username, hash_password(password), email, role))
         conn.commit()
         log_activity("admin", f"Utente creato: {username}", severity="info")
@@ -1243,7 +1256,7 @@ async def admin_update_user(username: str, request: Request):
     for key, value in updates.items():
         if key == "is_active":
             value = 1 if value else 0
-        conn.execute(f"UPDATE users SET {key} = ? WHERE username = %s", (value, username))
+        conn.execute(f"UPDATE users SET {key} = %s WHERE username = %s", (value, username))
     
     conn.commit()
     log_activity("admin", f"Utente aggiornato: {username}", severity="info")
@@ -1262,7 +1275,7 @@ async def admin_reset_password(username: str, request: Request):
     if not user:
         raise HTTPException(status_code=404, detail="Utente non trovato")
     
-    conn.execute("UPDATE users SET password_hash = ? WHERE username = %s", 
+    conn.execute("UPDATE users SET password_hash = %s WHERE username = %s", 
                   (hash_password(new_password), username))
     conn.commit()
     
@@ -1280,7 +1293,7 @@ async def admin_toggle_user_active(username: str, request: Request):
         raise HTTPException(status_code=400, detail="Non puoi disabilitare l'admin")
     
     new_status = 0 if user["is_active"] else 1
-    conn.execute("UPDATE users SET is_active = ? WHERE username = %s", (new_status, username))
+    conn.execute("UPDATE users SET is_active = %s WHERE username = %s", (new_status, username))
     conn.commit()
     
     status_text = "abilitato" if new_status else "disabilitato"

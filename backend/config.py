@@ -20,12 +20,12 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
 
     # Database - PostgreSQL
-    DATABASE_URL: str = "postgresql://proxmox:proxmox123@db:5432/proxmox_dashboard"
-    DB_HOST: str = "db"
+    DATABASE_URL: str = "postgresql://<DB_USER>:<DB_PASSWORD>@syam-proxmox-dashboard-vmdtp.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com:5432/<DB_NAME>"
+    DB_HOST: str = "syam-proxmox-dashboard-vmdtp.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com"
     DB_PORT: int = 5432
-    DB_NAME: str = "proxmox_dashboard"
-    DB_USER: str = "proxmox"
-    DB_PASSWORD: str = "proxmox123"
+    DB_NAME: str = "postgres"
+    DB_USER: str = ""
+    DB_PASSWORD: str = ""
 
     # Proxmox Nodes - Auto-discovered from cluster via API
     PROXMOX_NODES: List[dict] = []
