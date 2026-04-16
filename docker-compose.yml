@@ -8,10 +8,10 @@ services:
     restart: unless-stopped
     environment:
       - PORT=8000
-      - DB_HOST=syam-proxmox-dashboard-vmdtp.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com
+      - DB_HOST=syam-projectwork-pontos.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com
       - DB_PORT=5432
       - DB_NAME=postgres
-      - DB_USER=proxmox
+      - DB_USER=pontos
       - DB_PASSWORD=Vmware1!
       - DB_SSLMODE=require
       - DB_SSLROOTCERT=

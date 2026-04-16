@@ -258,18 +258,21 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     return payload
 
 def verify_user(username: str, password: str) -> Optional[dict]:
-    conn = get_db()
-    user = conn.execute(
-        "SELECT * FROM users WHERE username = %s AND is_active = TRUE", (username,)
-    ).fetchone()
-    if user and verify_password(password, user["password_hash"]):
-        return dict(user)
-    return None
+    with get_db() as conn:
+        user = conn.execute(
+            "SELECT * FROM users WHERE username = %s AND is_active = TRUE", (username,)
+        ).fetchone()
+        if user and verify_password(password, user["password_hash"]):
+            return dict(user)
+        return None
 
 def get_user_by_username(username: str) -> Optional[dict]:
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
-    return dict(user) if user else None
+    with get_db() as conn:
+        user = conn.execute(
+            "SELECT * FROM users WHERE username = %s",
+            (username,),
+        ).fetchone()
+        return dict(user) if user else None
 
 # ─── Background Task: Proactive Cache Refresh ─────────────────────────────────
 # Il refresh viene eseguito proattivamente in background.
@@ -409,9 +412,12 @@ async def login(request: Request):
                      ip_address=request.client.host if request.client else None,
                      severity="warning")
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    conn = get_db()
-    conn.execute("UPDATE users SET last_login = NOW() WHERE username = %s", (username,))
-    conn.commit()
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET last_login = NOW() WHERE username = %s",
+            (username,),
+        )
+        conn.commit()
     
     access_token = create_access_token({"sub": username, "role": user["role"]})
     log_activity(username, "Login successful",
@@ -711,21 +717,21 @@ async def migrate_container(node: str, vmid: int, request: Request):
 # ─── Routes: Metrics History ──────────────────────────────────────────────────
 @app.get("/api/metrics/history")
 async def get_metrics_history(node: Optional[str] = None, hours: int = 24):
-    conn  = get_db()
-    since = (datetime.now() - timedelta(hours=hours)).isoformat()
-    if node:
-        rows = conn.execute("""
-            SELECT * FROM metrics_snapshots
-            WHERE node_name = %s AND timestamp >= %s
-            ORDER BY timestamp DESC LIMIT 500
-        """, (node, since)).fetchall()
-    else:
-        rows = conn.execute("""
-            SELECT * FROM metrics_snapshots
-            WHERE timestamp >= %s
-            ORDER BY timestamp DESC LIMIT 1000
-        """, (since,)).fetchall()
-    return {"data": [dict(r) for r in rows]}
+    with get_db() as conn:
+        since = (datetime.now() - timedelta(hours=hours)).isoformat()
+        if node:
+            rows = conn.execute("""
+                SELECT * FROM metrics_snapshots
+                WHERE node_name = %s AND timestamp >= %s
+                ORDER BY timestamp DESC LIMIT 500
+            """, (node, since)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM metrics_snapshots
+                WHERE timestamp >= %s
+                ORDER BY timestamp DESC LIMIT 1000
+            """, (since,)).fetchall()
+        return {"data": [dict(r) for r in rows]}
 
 # ─── Routes: Services ─────────────────────────────────────────────────────────
 @app.get("/api/services")
@@ -751,25 +757,25 @@ async def get_realtime_logs(limit: int = 100, node: Optional[str] = None):
 
 @app.get("/api/logs/activity")
 async def get_activity_logs(limit: int = 100, severity: Optional[str] = None):
-    conn = get_db()
-    if severity:
-        rows = conn.execute("""
-            SELECT * FROM activity_log WHERE severity = %s
-            ORDER BY timestamp DESC LIMIT %s
-        """, (severity, limit)).fetchall()
-    else:
-        rows = conn.execute("""
-            SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT %s
-        """, (limit,)).fetchall()
-    return {"logs": [dict(r) for r in rows], "count": len(rows)}
+    with get_db() as conn:
+        if severity:
+            rows = conn.execute("""
+                SELECT * FROM activity_log WHERE severity = %s
+                ORDER BY timestamp DESC LIMIT %s
+            """, (severity, limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT %s
+            """, (limit,)).fetchall()
+        return {"logs": [dict(r) for r in rows], "count": len(rows)}
 
 @app.get("/api/logs/access")
 async def get_access_logs(limit: int = 100):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT * FROM access_log ORDER BY timestamp DESC LIMIT %s
-    """, (limit,)).fetchall()
-    return {"logs": [dict(r) for r in rows], "count": len(rows)}
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM access_log ORDER BY timestamp DESC LIMIT %s
+        """, (limit,)).fetchall()
+        return {"logs": [dict(r) for r in rows], "count": len(rows)}
 
 # ─── Routes: Tasks ────────────────────────────────────────────────────────────
 @app.get("/api/tasks")
@@ -916,90 +922,91 @@ async def get_budget():
 
 @app.get("/api/budget/config")
 async def get_budget_config():
-    conn = get_db()
-    rows = conn.execute("SELECT key, value FROM cost_config WHERE category = 'budget'").fetchall()
-    config = {}
-    for row in rows:
-        try:
-            config[row['key']] = float(row['value'])
-        except:
-            config[row['key']] = row['value']
-    
-    node_rows = conn.execute("SELECT node_name as name, tdp_idle_w as idle, tdp_max_w as max_w, enabled FROM cost_config_nodes").fetchall()
-    nodes = [dict(r) for r in node_rows]
-    
-    if not nodes:
-        nodes = [
-            {"name": "G5ProxMox1", "watt": 50, "enabled": True},
-            {"name": "G5ProxMox2", "watt": 50, "enabled": True},
-            {"name": "G5ProxMox3", "watt": 50, "enabled": True},
-        ]
-    
-    return {**config, "nodes": nodes}
+    with get_db() as conn:
+        rows = conn.execute("SELECT key, value FROM cost_config WHERE category = 'budget'").fetchall()
+        config = {}
+        for row in rows:
+            try:
+                config[row['key']] = float(row['value'])
+            except:
+                config[row['key']] = row['value']
+        
+        node_rows = conn.execute(
+            "SELECT node_name as name, tdp_idle_w as idle, tdp_max_w as max_w, enabled FROM cost_config_nodes"
+        ).fetchall()
+        nodes = [dict(r) for r in node_rows]
+        
+        if not nodes:
+            nodes = [
+                {"name": "G5ProxMox1", "watt": 50, "enabled": True},
+                {"name": "G5ProxMox2", "watt": 50, "enabled": True},
+                {"name": "G5ProxMox3", "watt": 50, "enabled": True},
+            ]
+        
+        return {**config, "nodes": nodes}
 
 @app.post("/api/budget/config")
 async def save_budget_config(request: Request):
     body = await request.json()
-    conn = get_db()
-    
-    budget_keys = [
-        'electricity_cost_kwh', 'node_tdp_idle_w', 'node_tdp_max_w',
-        'node_hours_per_month', 'cooling_overhead_pct', 'monthly_connectivity',
-        'proxmox_subscription_per_node', 'monthly_backup_offsite',
-        'hardware_cost_per_node', 'hardware_amortization_months', 'monthly_budget'
-    ]
-    
-    for key in budget_keys:
-        if key in body:
-            value = str(body[key])
-            conn.execute("""
-                INSERT INTO cost_config (category, key, value)
-                VALUES ('budget', %s, %s)
-                ON CONFLICT (key) DO UPDATE SET
-                    category = EXCLUDED.category,
-                    value = EXCLUDED.value
-            """, (key, value))
-    
-    if 'nodes' in body:
-        for node in body['nodes']:
-            enabled = 1 if node.get('enabled', True) else 0
-            conn.execute("""
-                INSERT INTO cost_config_nodes (node_name, tdp_idle_w, tdp_max_w, enabled)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (node_name) DO UPDATE SET
-                    tdp_idle_w = EXCLUDED.tdp_idle_w,
-                    tdp_max_w = EXCLUDED.tdp_max_w,
-                    enabled = EXCLUDED.enabled,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (
-                node['name'],
-                float(body.get('node_tdp_idle_w', 20)),
-                float(body.get('node_tdp_max_w', 65)),
-                enabled
-            ))
-    
-    conn.commit()
-    log_activity("admin", "Budget configuration updated", severity="info")
-    return {"success": True}
+    with get_db() as conn:
+        budget_keys = [
+            'electricity_cost_kwh', 'node_tdp_idle_w', 'node_tdp_max_w',
+            'node_hours_per_month', 'cooling_overhead_pct', 'monthly_connectivity',
+            'proxmox_subscription_per_node', 'monthly_backup_offsite',
+            'hardware_cost_per_node', 'hardware_amortization_months', 'monthly_budget'
+        ]
+        
+        for key in budget_keys:
+            if key in body:
+                value = str(body[key])
+                conn.execute("""
+                    INSERT INTO cost_config (category, key, value)
+                    VALUES ('budget', %s, %s)
+                    ON CONFLICT (key) DO UPDATE SET
+                        category = EXCLUDED.category,
+                        value = EXCLUDED.value
+                """, (key, value))
+        
+        if 'nodes' in body:
+            for node in body['nodes']:
+                enabled = 1 if node.get('enabled', True) else 0
+                conn.execute("""
+                    INSERT INTO cost_config_nodes (node_name, tdp_idle_w, tdp_max_w, enabled)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (node_name) DO UPDATE SET
+                        tdp_idle_w = EXCLUDED.tdp_idle_w,
+                        tdp_max_w = EXCLUDED.tdp_max_w,
+                        enabled = EXCLUDED.enabled,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (
+                    node['name'],
+                    float(body.get('node_tdp_idle_w', 20)),
+                    float(body.get('node_tdp_max_w', 65)),
+                    enabled
+                ))
+        
+        conn.commit()
+        log_activity("admin", "Budget configuration updated", severity="info")
+        return {"success": True}
 
 @app.get("/api/budget/history")
 async def get_budget_history():
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT * FROM budget_records ORDER BY timestamp DESC LIMIT 200
-    """).fetchall()
-    return {"records": [dict(r) for r in rows]}
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM budget_records ORDER BY timestamp DESC LIMIT 200
+        """).fetchall()
+        return {"records": [dict(r) for r in rows]}
 
 # ─── Routes: Cost Config ──────────────────────────────────────────────────────
 @app.get("/api/cost-config")
 async def get_cost_config_api():
-    conn        = get_db()
-    global_rows = conn.execute("SELECT * FROM cost_config ORDER BY category, key").fetchall()
-    node_rows   = conn.execute("SELECT * FROM cost_config_nodes").fetchall()
-    return {
-        "global": [dict(r) for r in global_rows],
-        "nodes":  [dict(r) for r in node_rows],
-    }
+    with get_db() as conn:
+        global_rows = conn.execute("SELECT * FROM cost_config ORDER BY category, key").fetchall()
+        node_rows   = conn.execute("SELECT * FROM cost_config_nodes").fetchall()
+        return {
+            "global": [dict(r) for r in global_rows],
+            "nodes":  [dict(r) for r in node_rows],
+        }
 
 @app.post("/api/cost-config/global")
 async def update_global_cost_config(request: Request):
@@ -1040,53 +1047,53 @@ async def update_node_cost_config(node_name: str, request: Request):
 # ─── Routes: Alerts ───────────────────────────────────────────────────────────
 @app.get("/api/alerts")
 async def get_alerts(resolved: bool = False):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT * FROM alerts WHERE resolved = %s
-        ORDER BY timestamp DESC LIMIT 100
-    """, (1 if resolved else 0,)).fetchall()
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM alerts WHERE resolved = %s
+            ORDER BY timestamp DESC LIMIT 100
+        """, (1 if resolved else 0,)).fetchall()
 
-    summary     = cluster.get_cluster_summary()
-    live_alerts = []
-    for node in summary["nodes"]:
-        if node["cpu_usage"] > 90:
-            live_alerts.append({"type":"cpu_high","severity":"critical","node":node["name"],
-                                "value":node["cpu_usage"],"message":f"CPU usage critical: {node['cpu_usage']}%"})
-        elif node["cpu_usage"] > 75:
-            live_alerts.append({"type":"cpu_high","severity":"warning","node":node["name"],
-                                "value":node["cpu_usage"],"message":f"CPU usage high: {node['cpu_usage']}%"})
-        if node["mem_percent"] > 90:
-            live_alerts.append({"type":"mem_high","severity":"critical","node":node["name"],
-                                "value":node["mem_percent"],"message":f"Memory usage critical: {node['mem_percent']}%"})
-        if node["status"] == "offline":
-            live_alerts.append({"type":"node_offline","severity":"critical","node":node["name"],
-                                "message":f"Node {node['name']} is offline!"})
-    return {
-        "alerts": [dict(r) for r in rows],
-        "live_alerts": live_alerts,
-        "count": len(rows) + len(live_alerts)
-    }
+        summary     = cluster.get_cluster_summary()
+        live_alerts = []
+        for node in summary["nodes"]:
+            if node["cpu_usage"] > 90:
+                live_alerts.append({"type":"cpu_high","severity":"critical","node":node["name"],
+                                    "value":node["cpu_usage"],"message":f"CPU usage critical: {node['cpu_usage']}%"})
+            elif node["cpu_usage"] > 75:
+                live_alerts.append({"type":"cpu_high","severity":"warning","node":node["name"],
+                                    "value":node["cpu_usage"],"message":f"CPU usage high: {node['cpu_usage']}%"})
+            if node["mem_percent"] > 90:
+                live_alerts.append({"type":"mem_high","severity":"critical","node":node["name"],
+                                    "value":node["mem_percent"],"message":f"Memory usage critical: {node['mem_percent']}%"})
+            if node["status"] == "offline":
+                live_alerts.append({"type":"node_offline","severity":"critical","node":node["name"],
+                                    "message":f"Node {node['name']} is offline!"})
+        return {
+            "alerts": [dict(r) for r in rows],
+            "live_alerts": live_alerts,
+            "count": len(rows) + len(live_alerts)
+        }
 
 @app.post("/api/alerts/{alert_id}/resolve")
 async def resolve_alert(alert_id: int, request: Request):
-    conn = get_db()
-    conn.execute("""
-        UPDATE alerts SET resolved = 1, resolved_at = NOW() WHERE id = %s
-    """, (alert_id,))
-    conn.commit()
-    log_activity("admin", f"Alert {alert_id} resolved",
-                 ip_address=request.client.host if request.client else None)
-    return {"success": True}
+    with get_db() as conn:
+        conn.execute("""
+            UPDATE alerts SET resolved = 1, resolved_at = NOW() WHERE id = %s
+        """, (alert_id,))
+        conn.commit()
+        log_activity("admin", f"Alert {alert_id} resolved",
+                     ip_address=request.client.host if request.client else None)
+        return {"success": True}
 
 # ─── Routes: Governance / Users ───────────────────────────────────────────────
 @app.get("/api/governance/users")
 async def get_users():
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT id, username, email, role, is_active, created_at, last_login
-        FROM users ORDER BY created_at DESC
-    """).fetchall()
-    return {"users": [dict(r) for r in rows]}
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT id, username, email, role, is_active, created_at, last_login
+            FROM users ORDER BY created_at DESC
+        """).fetchall()
+        return {"users": [dict(r) for r in rows]}
 
 @app.post("/api/governance/users")
 async def create_user(request: Request):
@@ -1097,49 +1104,49 @@ async def create_user(request: Request):
     role     = body.get("role", "viewer")
     if not username or not password:
         raise HTTPException(status_code=400, detail="Username and password required")
-    conn = get_db()
-    try:
-        conn.execute("""
-            INSERT INTO users (username, password_hash, email, role)
-            VALUES (%s, %s, %s, %s)
-        """, (username, hash_password(password), email, role))
-        conn.commit()
-        log_activity("admin", f"User created: {username}", severity="info")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"success": True, "username": username}
+    with get_db() as conn:
+        try:
+            conn.execute("""
+                INSERT INTO users (username, password_hash, email, role)
+                VALUES (%s, %s, %s, %s)
+            """, (username, hash_password(password), email, role))
+            conn.commit()
+            log_activity("admin", f"User created: {username}", severity="info")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"success": True, "username": username}
 
 @app.get("/api/governance/audit")
 async def get_audit_log(limit: int = 200):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT %s
-    """, (limit,)).fetchall()
-    return {"audit": [dict(r) for r in rows], "count": len(rows)}
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT %s
+        """, (limit,)).fetchall()
+        return {"audit": [dict(r) for r in rows], "count": len(rows)}
 
 # ─── Routes: Account Management ─────────────────────────────────────────────
 @app.get("/api/account/profile")
 async def get_account_profile(current_user: dict = Depends(get_current_user)):
     username = current_user.get("sub")
-    conn = get_db()
-    user = conn.execute("""
-        SELECT id, username, email, role, is_active, created_at, last_login
-        FROM users WHERE username = %s
-    """, (username,)).fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utente non trovato")
-    return dict(user)
+    with get_db() as conn:
+        user = conn.execute("""
+            SELECT id, username, email, role, is_active, created_at, last_login
+            FROM users WHERE username = %s
+        """, (username,)).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        return dict(user)
 
 @app.put("/api/account/profile")
 async def update_account_profile(request: Request, current_user: dict = Depends(get_current_user)):
     body = await request.json()
     username = current_user.get("sub")
     email = body.get("email", "")
-    conn = get_db()
-    conn.execute("UPDATE users SET email = %s WHERE username = %s", (email, username))
-    conn.commit()
-    log_activity(username, "Profilo aggiornato", severity="info")
-    return {"success": True}
+    with get_db() as conn:
+        conn.execute("UPDATE users SET email = %s WHERE username = %s", (email, username))
+        conn.commit()
+        log_activity(username, "Profilo aggiornato", severity="info")
+        return {"success": True}
 
 @app.post("/api/account/password")
 async def change_account_password(request: Request):
@@ -1151,66 +1158,66 @@ async def change_account_password(request: Request):
     if not username or not current_password or not new_password:
         raise HTTPException(status_code=400, detail="Tutti i campi sono obbligatori")
     
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utente non trovato")
-    
-    if user["password_hash"] != hash_password(current_password):
-        log_activity(username, "Tentativo cambio password fallito", severity="warning")
-        raise HTTPException(status_code=401, detail="Password attuale non corretta")
-    
-    new_hash = hash_password(new_password)
-    conn.execute("UPDATE users SET password_hash = %s WHERE username = %s", (new_hash, username))
-    conn.commit()
-    log_activity(username, "Password cambiata", severity="info")
-    return {"success": True}
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        
+        if user["password_hash"] != hash_password(current_password):
+            log_activity(username, "Tentativo cambio password fallito", severity="warning")
+            raise HTTPException(status_code=401, detail="Password attuale non corretta")
+        
+        new_hash = hash_password(new_password)
+        conn.execute("UPDATE users SET password_hash = %s WHERE username = %s", (new_hash, username))
+        conn.commit()
+        log_activity(username, "Password cambiata", severity="info")
+        return {"success": True}
 
 # ─── Routes: Admin User Management ──────────────────────────────────────────
 @app.get("/api/admin/users")
 async def admin_get_users():
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT id, username, email, role, is_active, created_at, last_login
-        FROM users ORDER BY created_at DESC
-    """).fetchall()
-    users = [dict(r) for r in rows]
-    
-    for user in users:
-        activity_count = conn.execute("""
-            SELECT COUNT(*) FROM activity_log WHERE "user" = %s
-        """, (user["username"],)).fetchone()[0]
-        user["activity_count"] = activity_count
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT id, username, email, role, is_active, created_at, last_login
+            FROM users ORDER BY created_at DESC
+        """).fetchall()
+        users = [dict(r) for r in rows]
         
-        access_count = conn.execute("""
-            SELECT COUNT(*) FROM access_log WHERE username = %s
-        """, (user["username"],)).fetchone()[0]
-        user["access_count"] = access_count
+        for user in users:
+            activity_count = conn.execute("""
+                SELECT COUNT(*) FROM activity_log WHERE "user" = %s
+            """, (user["username"],)).fetchone()[0]
+            user["activity_count"] = activity_count
+            
+            access_count = conn.execute("""
+                SELECT COUNT(*) FROM access_log WHERE username = %s
+            """, (user["username"],)).fetchone()[0]
+            user["access_count"] = access_count
+            
+            last_activity = conn.execute("""
+                SELECT timestamp, action FROM activity_log WHERE "user" = %s ORDER BY timestamp DESC LIMIT 1
+            """, (user["username"],)).fetchone()
+            user["last_activity"] = dict(last_activity) if last_activity else None
         
-        last_activity = conn.execute("""
-            SELECT timestamp, action FROM activity_log WHERE "user" = %s ORDER BY timestamp DESC LIMIT 1
-        """, (user["username"],)).fetchone()
-        user["last_activity"] = dict(last_activity) if last_activity else None
-    
-    return {"users": users, "count": len(users)}
+        return {"users": users, "count": len(users)}
 
 @app.get("/api/admin/users/{username}/activity")
 async def admin_get_user_activity(username: str, limit: int = 50):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT * FROM activity_log WHERE "user" = %s
-        ORDER BY timestamp DESC LIMIT %s
-    """, (username, limit)).fetchall()
-    return {"activity": [dict(r) for r in rows], "count": len(rows)}
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM activity_log WHERE "user" = %s
+            ORDER BY timestamp DESC LIMIT %s
+        """, (username, limit)).fetchall()
+        return {"activity": [dict(r) for r in rows], "count": len(rows)}
 
 @app.get("/api/admin/users/{username}/access")
 async def admin_get_user_access(username: str, limit: int = 50):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT * FROM access_log WHERE username = %s
-        ORDER BY timestamp DESC LIMIT %s
-    """, (username, limit)).fetchall()
-    return {"access": [dict(r) for r in rows], "count": len(rows)}
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM access_log WHERE username = %s
+            ORDER BY timestamp DESC LIMIT %s
+        """, (username, limit)).fetchall()
+        return {"access": [dict(r) for r in rows], "count": len(rows)}
 
 @app.post("/api/admin/users")
 async def admin_create_user(request: Request):
@@ -1226,41 +1233,40 @@ async def admin_create_user(request: Request):
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="Password deve essere di almeno 6 caratteri")
     
-    conn = get_db()
-    try:
-        conn.execute("""
-            INSERT INTO users (username, password_hash, email, role)
-            VALUES (%s, %s, %s, %s)
-        """, (username, hash_password(password), email, role))
-        conn.commit()
-        log_activity("admin", f"Utente creato: {username}", severity="info")
-        return {"success": True, "username": username}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    with get_db() as conn:
+        try:
+            conn.execute("""
+                INSERT INTO users (username, password_hash, email, role)
+                VALUES (%s, %s, %s, %s)
+            """, (username, hash_password(password), email, role))
+            conn.commit()
+            log_activity("admin", f"Utente creato: {username}", severity="info")
+            return {"success": True, "username": username}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 @app.put("/api/admin/users/{username}")
 async def admin_update_user(username: str, request: Request):
     body = await request.json()
-    conn = get_db()
-    
-    user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utente non trovato")
-    
-    allowed_fields = ["email", "role", "is_active"]
-    updates = {k: v for k, v in body.items() if k in allowed_fields}
-    
-    if not updates:
-        return {"success": True, "message": "Nessun aggiornamento"}
-    
-    for key, value in updates.items():
-        if key == "is_active":
-            value = 1 if value else 0
-        conn.execute(f"UPDATE users SET {key} = %s WHERE username = %s", (value, username))
-    
-    conn.commit()
-    log_activity("admin", f"Utente aggiornato: {username}", severity="info")
-    return {"success": True, "updates": list(updates.keys())}
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        
+        allowed_fields = ["email", "role", "is_active"]
+        updates = {k: v for k, v in body.items() if k in allowed_fields}
+        
+        if not updates:
+            return {"success": True, "message": "Nessun aggiornamento"}
+        
+        for key, value in updates.items():
+            if key == "is_active":
+                value = 1 if value else 0
+            conn.execute(f"UPDATE users SET {key} = %s WHERE username = %s", (value, username))
+        
+        conn.commit()
+        log_activity("admin", f"Utente aggiornato: {username}", severity="info")
+        return {"success": True, "updates": list(updates.keys())}
 
 @app.post("/api/admin/users/{username}/reset-password")
 async def admin_reset_password(username: str, request: Request):
@@ -1270,35 +1276,35 @@ async def admin_reset_password(username: str, request: Request):
     if not new_password or len(new_password) < 6:
         new_password = f"Temp_{username}_{datetime.now().strftime('%Y%m%d%H%M')}"
     
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utente non trovato")
-    
-    conn.execute("UPDATE users SET password_hash = %s WHERE username = %s", 
-                  (hash_password(new_password), username))
-    conn.commit()
-    
-    log_activity("admin", f"Password resettata per: {username}", resource=f"user:{username}", severity="warning")
-    return {"success": True, "new_password": new_password}
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        
+        conn.execute("UPDATE users SET password_hash = %s WHERE username = %s",
+                      (hash_password(new_password), username))
+        conn.commit()
+        
+        log_activity("admin", f"Password resettata per: {username}", resource=f"user:{username}", severity="warning")
+        return {"success": True, "new_password": new_password}
 
 @app.post("/api/admin/users/{username}/toggle-active")
 async def admin_toggle_user_active(username: str, request: Request):
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utente non trovato")
-    
-    if username == "admin":
-        raise HTTPException(status_code=400, detail="Non puoi disabilitare l'admin")
-    
-    new_status = 0 if user["is_active"] else 1
-    conn.execute("UPDATE users SET is_active = %s WHERE username = %s", (new_status, username))
-    conn.commit()
-    
-    status_text = "abilitato" if new_status else "disabilitato"
-    log_activity("admin", f"Utente {status_text}: {username}", severity="warning")
-    return {"success": True, "is_active": bool(new_status)}
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        
+        if username == "admin":
+            raise HTTPException(status_code=400, detail="Non puoi disabilitare l'admin")
+        
+        new_status = 0 if user["is_active"] else 1
+        conn.execute("UPDATE users SET is_active = %s WHERE username = %s", (new_status, username))
+        conn.commit()
+        
+        status_text = "abilitato" if new_status else "disabilitato"
+        log_activity("admin", f"Utente {status_text}: {username}", severity="warning")
+        return {"success": True, "is_active": bool(new_status)}
 
 @app.post("/api/admin/users/{username}/force-logout")
 async def admin_force_logout(username: str, request: Request):
@@ -1310,16 +1316,16 @@ async def admin_delete_user(username: str, request: Request):
     if username == "admin":
         raise HTTPException(status_code=400, detail="Non puoi eliminare l'admin")
     
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utente non trovato")
-    
-    conn.execute("DELETE FROM users WHERE username = %s", (username,))
-    conn.commit()
-    
-    log_activity("admin", f"Utente eliminato: {username}", severity="critical")
-    return {"success": True}
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        
+        conn.execute("DELETE FROM users WHERE username = %s", (username,))
+        conn.commit()
+        
+        log_activity("admin", f"Utente eliminato: {username}", severity="critical")
+        return {"success": True}
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────
 @app.websocket("/ws")

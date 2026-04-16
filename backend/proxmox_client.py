@@ -918,6 +918,11 @@ class ProxmoxCluster:
             conn.commit()
         except Exception as e:
             print(f"Error saving metrics: {e}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def invalidate_cache(self):
         """Invalida la cache dei nodi (usato dopo power actions)."""
