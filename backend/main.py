@@ -1185,13 +1185,13 @@ async def admin_get_users():
         
         for user in users:
             activity_count = conn.execute("""
-                SELECT COUNT(*) FROM activity_log WHERE "user" = %s
-            """, (user["username"],)).fetchone()[0]
+                SELECT COUNT(*) AS activity_count FROM activity_log WHERE "user" = %s
+            """, (user["username"],)).fetchone()["activity_count"]
             user["activity_count"] = activity_count
             
             access_count = conn.execute("""
-                SELECT COUNT(*) FROM access_log WHERE username = %s
-            """, (user["username"],)).fetchone()[0]
+                SELECT COUNT(*) AS access_count FROM access_log WHERE username = %s
+            """, (user["username"],)).fetchone()["access_count"]
             user["access_count"] = access_count
             
             last_activity = conn.execute("""
