@@ -31,6 +31,13 @@ def init_pool():
     """Initialize connection pool."""
     global _connection_pool
     if _connection_pool is None:
+        if not DB_HOST or not DB_HOST.strip():
+            raise RuntimeError("DB_HOST is empty. Set DB_HOST in the container environment (.env / docker-compose).")
+        if not DB_USER or not DB_USER.strip():
+            raise RuntimeError("DB_USER is empty. Set DB_USER in the container environment (.env / docker-compose).")
+        if not DB_PASSWORD or not DB_PASSWORD.strip():
+            raise RuntimeError("DB_PASSWORD is empty. Set DB_PASSWORD in the container environment (.env / docker-compose).")
+
         connect_kwargs = {
             "host": DB_HOST,
             "port": DB_PORT,

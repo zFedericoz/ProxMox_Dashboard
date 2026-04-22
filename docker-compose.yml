@@ -8,14 +8,18 @@ services:
     restart: unless-stopped
     environment:
       - PORT=8000
-      - DB_HOST=syam-projectwork-pontos.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com
-      - DB_PORT=5432
-      - DB_NAME=postgres
-      - DB_USER=pontos
-      - DB_PASSWORD=Vmware1!
-      - DB_SSLMODE=require
-      - DB_SSLROOTCERT=
-      - PROXMOX_VERIFY_SSL=false
+      - DB_HOST=${DB_HOST:?DB_HOST is required (set it in .env)}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-postgres}
+      - DB_USER=${DB_USER:?DB_USER is required (set it in .env)}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required (set it in .env)}
+      - DB_SSLMODE=${DB_SSLMODE:-require}
+      - DB_SSLROOTCERT=${DB_SSLROOTCERT:-}
+      - PROXMOX_USER=${PROXMOX_USER:-root@pam}
+      - PROXMOX_PASSWORD=${PROXMOX_PASSWORD:-}
+      - PROXMOX_TOKEN_NAME=${PROXMOX_TOKEN_NAME:-}
+      - PROXMOX_TOKEN_VALUE=${PROXMOX_TOKEN_VALUE:-}
+      - PROXMOX_VERIFY_SSL=${PROXMOX_VERIFY_SSL:-false}
     networks:
       - dashboard-network
 

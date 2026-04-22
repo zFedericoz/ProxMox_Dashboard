@@ -10,7 +10,7 @@ Dashboard di monitoraggio per cluster Proxmox con 3 nodi.
 
 ## Configurazione
 
-1. Copia `.env.example` in `.env` e modifica le credenziali:
+1. Copia `.env.example` in `.env` e modifica le credenziali (oppure aggiorna `docker-compose.yml` se preferisci tenere tutto lì):
 
 ```bash
 cp .env.example .env
@@ -27,7 +27,7 @@ nano .env
 ## Avvio
 
 ```bash
-# Avvio con immagini ECR (frontend/backend separati)
+# Avvio
 docker-compose up -d
 ```
 

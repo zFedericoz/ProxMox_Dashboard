@@ -24,7 +24,13 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
       
       if (!response.ok) {
         const data = await response.json().catch(() => ({}))
-        throw new Error(data.detail || `HTTP ${response.status}`)
+        const detail =
+          typeof data.detail === 'string'
+            ? data.detail
+            : data.detail
+              ? JSON.stringify(data.detail)
+              : null
+        throw new Error(detail || `HTTP ${response.status}`)
       }
       
       const data = await response.json()
@@ -84,7 +90,9 @@ export function useApi(endpoint, options = {}) {
     const cacheKey = buildUrl()
     const cached = globalCache.get(cacheKey)
     
-    if (!force && cached && (now - lastFetchTimeRef.current) < staleTime && data) {
+    // Fast path: serve cache even if local state is empty (e.g. first render)
+    if (!force && cached && (now - lastFetchTimeRef.current) < staleTime) {
+      if (data !== cached) setData(cached)
       return { success: true, data: cached, cached: true }
     }
     
@@ -103,10 +111,9 @@ export function useApi(endpoint, options = {}) {
     })
 
     if (result.success) {
-      if (!result.cached) {
-        setData(result.data)
-        lastFetchTimeRef.current = now
-      }
+      // Keep state in sync even when server replies 304
+      setData(result.data)
+      lastFetchTimeRef.current = now
     } else {
       if (result.error !== 'UNAUTHORIZED') {
         setError(result.error)
@@ -128,11 +135,16 @@ export function useApi(endpoint, options = {}) {
       fetchOptions.body = JSON.stringify(body)
     }
 
-    const result = await fetchWithRetry(buildUrl(), fetchOptions)
+    const url = buildUrl()
+    const result = await fetchWithRetry(url, fetchOptions)
 
     if (result.success) {
       setData(result.data)
       lastFetchTimeRef.current = Date.now()
+      // Any non-GET mutation should invalidate cached GET responses for this endpoint.
+      if (method && method.toUpperCase() !== 'GET') {
+        globalCache.delete(url)
+      }
     } else {
       if (result.error !== 'UNAUTHORIZED') {
         setError(result.error)

@@ -33,6 +33,8 @@ from database import (
     get_proxmox_nodes, get_proxmox_node, create_proxmox_node, update_proxmox_node, delete_proxmox_node
 )
 from proxmox_client import cluster, reload_nodes, init_cluster_from_db
+from api.nodes import router as nodes_router
+from api.alerts import router as alerts_router
 
 # ─── App Setup ────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -41,6 +43,10 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url=None
 )
+
+# Routers
+app.include_router(nodes_router)
+app.include_router(alerts_router)
 
 # Rate limiter setup
 limiter = Limiter(key_func=get_remote_address)
@@ -472,70 +478,6 @@ async def get_drs_recommendations():
 async def get_vm_placement_suggestion():
     """Get suggested best node for VM placement."""
     return cluster.get_vm_placement_suggestion()
-
-# ─── Routes: Node Management (CRUD) ───────────────────────────────────────────
-@app.get("/api/nodes")
-async def get_all_nodes():
-    """Get all configured Proxmox nodes."""
-    nodes = get_proxmox_nodes()
-    return {"nodes": nodes, "count": len(nodes)}
-
-@app.get("/api/nodes/{node_name}")
-async def get_node(node_name: str):
-    """Get a specific Proxmox node."""
-    node = get_proxmox_node(node_name)
-    if not node:
-        raise HTTPException(status_code=404, detail=f"Nodo '{node_name}' non trovato")
-    return node
-
-@app.post("/api/nodes")
-async def create_node(request: Request):
-    """Create a new Proxmox node."""
-    body = await request.json()
-    name = body.get("name")
-    host = body.get("host")
-    if not name or not host:
-        raise HTTPException(status_code=400, detail="name e host sono obbligatori")
-    
-    port = body.get("port", 8006)
-    timeout = body.get("timeout", 8)
-    zone = body.get("zone", "Default")
-    
-    try:
-        node = create_proxmox_node(name, host, port, timeout, zone)
-        reload_nodes()
-        log_activity("admin", f"Nodo creato: {name}", resource=f"node:{name}", severity="info")
-        return {"success": True, "node": node}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.put("/api/nodes/{node_name}")
-async def update_node(node_name: str, request: Request):
-    """Update a Proxmox node."""
-    body = await request.json()
-    node = update_proxmox_node(node_name, **body)
-    if not node:
-        raise HTTPException(status_code=404, detail=f"Nodo '{node_name}' non trovato")
-    reload_nodes()
-    log_activity("admin", f"Nodo aggiornato: {node_name}", resource=f"node:{node_name}", severity="info")
-    return {"success": True, "node": node}
-
-@app.delete("/api/nodes/{node_name}")
-async def delete_node(node_name: str, request: Request):
-    """Delete a Proxmox node."""
-    try:
-        node = get_proxmox_node(node_name)
-        if not node:
-            raise HTTPException(status_code=404, detail=f"Nodo '{node_name}' non trovato")
-        delete_proxmox_node(node_name)
-        reload_nodes()
-        log_activity("admin", f"Nodo eliminato: {node_name}", resource=f"node:{node_name}", severity="warning")
-        return {"success": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error deleting node: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/cluster/vms")
 async def get_vms(node: Optional[str] = None):
@@ -969,7 +911,7 @@ async def save_budget_config(request: Request):
         
         if 'nodes' in body:
             for node in body['nodes']:
-                enabled = 1 if node.get('enabled', True) else 0
+                enabled = bool(node.get('enabled', True))
                 conn.execute("""
                     INSERT INTO cost_config_nodes (node_name, tdp_idle_w, tdp_max_w, enabled)
                     VALUES (%s, %s, %s, %s)
@@ -1043,47 +985,6 @@ async def update_node_cost_config(node_name: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
     log_activity("admin", f"Node cost config updated: {node_name}", severity="info")
     return {"success": True, "node": node_name, "params": params}
-
-# ─── Routes: Alerts ───────────────────────────────────────────────────────────
-@app.get("/api/alerts")
-async def get_alerts(resolved: bool = False):
-    with get_db() as conn:
-        rows = conn.execute("""
-            SELECT * FROM alerts WHERE resolved = %s
-            ORDER BY timestamp DESC LIMIT 100
-        """, (1 if resolved else 0,)).fetchall()
-
-        summary     = cluster.get_cluster_summary()
-        live_alerts = []
-        for node in summary["nodes"]:
-            if node["cpu_usage"] > 90:
-                live_alerts.append({"type":"cpu_high","severity":"critical","node":node["name"],
-                                    "value":node["cpu_usage"],"message":f"CPU usage critical: {node['cpu_usage']}%"})
-            elif node["cpu_usage"] > 75:
-                live_alerts.append({"type":"cpu_high","severity":"warning","node":node["name"],
-                                    "value":node["cpu_usage"],"message":f"CPU usage high: {node['cpu_usage']}%"})
-            if node["mem_percent"] > 90:
-                live_alerts.append({"type":"mem_high","severity":"critical","node":node["name"],
-                                    "value":node["mem_percent"],"message":f"Memory usage critical: {node['mem_percent']}%"})
-            if node["status"] == "offline":
-                live_alerts.append({"type":"node_offline","severity":"critical","node":node["name"],
-                                    "message":f"Node {node['name']} is offline!"})
-        return {
-            "alerts": [dict(r) for r in rows],
-            "live_alerts": live_alerts,
-            "count": len(rows) + len(live_alerts)
-        }
-
-@app.post("/api/alerts/{alert_id}/resolve")
-async def resolve_alert(alert_id: int, request: Request):
-    with get_db() as conn:
-        conn.execute("""
-            UPDATE alerts SET resolved = 1, resolved_at = NOW() WHERE id = %s
-        """, (alert_id,))
-        conn.commit()
-        log_activity("admin", f"Alert {alert_id} resolved",
-                     ip_address=request.client.host if request.client else None)
-        return {"success": True}
 
 # ─── Routes: Governance / Users ───────────────────────────────────────────────
 @app.get("/api/governance/users")
@@ -1261,7 +1162,7 @@ async def admin_update_user(username: str, request: Request):
         
         for key, value in updates.items():
             if key == "is_active":
-                value = 1 if value else 0
+                value = bool(value)
             conn.execute(f"UPDATE users SET {key} = %s WHERE username = %s", (value, username))
         
         conn.commit()
@@ -1298,13 +1199,13 @@ async def admin_toggle_user_active(username: str, request: Request):
         if username == "admin":
             raise HTTPException(status_code=400, detail="Non puoi disabilitare l'admin")
         
-        new_status = 0 if user["is_active"] else 1
+        new_status = not bool(user["is_active"])
         conn.execute("UPDATE users SET is_active = %s WHERE username = %s", (new_status, username))
         conn.commit()
         
         status_text = "abilitato" if new_status else "disabilitato"
         log_activity("admin", f"Utente {status_text}: {username}", severity="warning")
-        return {"success": True, "is_active": bool(new_status)}
+        return {"success": True, "is_active": new_status}
 
 @app.post("/api/admin/users/{username}/force-logout")
 async def admin_force_logout(username: str, request: Request):

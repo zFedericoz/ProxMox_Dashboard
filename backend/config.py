@@ -29,7 +29,9 @@ class Settings(BaseSettings):
 
     # Proxmox Nodes - Auto-discovered from cluster via API
     PROXMOX_NODES: List[dict] = []
+    # Proxmox API expects realm, typically root@pam
     PROXMOX_USER: str = "root@pam"
+    # Never ship real credentials as defaults
     PROXMOX_PASSWORD: str = ""
     PROXMOX_TOKEN_NAME: str = ""
     PROXMOX_TOKEN_VALUE: str = ""
