@@ -78,7 +78,7 @@ def format_uptime(seconds: int) -> str:
 
 
 class ProxmoxNode:
-    def __init__(self, name: str, host: str, port: int = 8006, timeout: int = 8):
+    def __init__(self, name: str, host: str, port: int = 8006, timeout: int = 8, cluster: dict = None):
         import requests
         self.name     = name
         self.host     = host
@@ -91,7 +91,7 @@ class ProxmoxNode:
         self.last_error  = None
         self.session = requests.Session()
         self.session.verify = settings.PROXMOX_VERIFY_SSL
-        # Pool HTTP tuned: max 10 connessioni riusabili per nodo
+        self.cluster = cluster
         _adapter = HTTPAdapter(
             pool_connections=4,
             pool_maxsize=10,
@@ -101,10 +101,12 @@ class ProxmoxNode:
         self.session.mount("http://",  _adapter)
 
     def _auth_header(self) -> dict:
-        if settings.PROXMOX_TOKEN_NAME and settings.PROXMOX_TOKEN_VALUE:
+        token_name = self.cluster.get("token_name") if self.cluster else None
+        token_value = self.cluster.get("token_value") if self.cluster else None
+        if token_name and token_value:
             return {"Authorization":
                     f"PVEAPIToken={settings.PROXMOX_USER}!"
-                    f"{settings.PROXMOX_TOKEN_NAME}={settings.PROXMOX_TOKEN_VALUE}"}
+                    f"{token_name}={token_value}"}
         if self.ticket:
             return {"Cookie": f"PVEAuthCookie={self.ticket}",
                     "CSRFPreventionToken": self.csrf_token or ""}
@@ -112,7 +114,9 @@ class ProxmoxNode:
 
     def authenticate(self) -> bool:
         try:
-            if settings.PROXMOX_TOKEN_NAME and settings.PROXMOX_TOKEN_VALUE:
+            token_name = self.cluster.get("token_name") if self.cluster else None
+            token_value = self.cluster.get("token_value") if self.cluster else None
+            if token_name and token_value:
                 self.connected = True
                 return True
             resp = self.session.post(
@@ -327,6 +331,9 @@ class ProxmoxNode:
 class ProxmoxCluster:
     def __init__(self):
         self.nodes: Dict[str, ProxmoxNode] = {}
+        self._active_cluster = None
+        if settings.PROXMOX_CLUSTERS:
+            self._active_cluster = settings.PROXMOX_CLUSTERS[0]
         if settings.PROXMOX_NODES:
             for nc in settings.PROXMOX_NODES:
                 self.nodes[nc["name"]] = ProxmoxNode(
@@ -335,6 +342,10 @@ class ProxmoxCluster:
                     port    = nc.get("port", 8006),
                     timeout = nc.get("timeout", 8)
                 )
+
+    def get_active_cluster(self):
+        """Return the active cluster config for token-based auth."""
+        return self._active_cluster
 
     def discover_from_cluster(self):
         """Scopri nodi dal cluster Proxmox via API (autodiscovery)."""

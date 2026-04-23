@@ -20,7 +20,7 @@ from proxmox_client import reload_nodes
 
 router = APIRouter(tags=["nodes"])
 
-def _fetch_cluster_node_names(host: str, port: int, timeout: int) -> list[str]:
+def _fetch_cluster_node_names(host: str, port: int, timeout: int, cluster: dict = None) -> list[str]:
     """
     Validate that the Proxmox API is reachable and credentials work.
     Returns the list of node names returned by /api2/json/nodes.
@@ -28,11 +28,14 @@ def _fetch_cluster_node_names(host: str, port: int, timeout: int) -> list[str]:
     base_url = f"https://{host}:{port}/api2/json"
     verify = bool(settings.PROXMOX_VERIFY_SSL)
 
-    if settings.PROXMOX_TOKEN_NAME and settings.PROXMOX_TOKEN_VALUE:
+    token_name = (cluster.get("token_name") if cluster else None) or settings.PROXMOX_TOKEN_NAME
+    token_value = (cluster.get("token_value") if cluster else None) or settings.PROXMOX_TOKEN_VALUE
+
+    if token_name and token_value:
         headers = {
             "Authorization": (
                 f"PVEAPIToken={settings.PROXMOX_USER}!"
-                f"{settings.PROXMOX_TOKEN_NAME}={settings.PROXMOX_TOKEN_VALUE}"
+                f"{token_name}={token_value}"
             )
         }
         r = requests.get(f"{base_url}/nodes", headers=headers, timeout=timeout, verify=verify)
@@ -41,7 +44,6 @@ def _fetch_cluster_node_names(host: str, port: int, timeout: int) -> list[str]:
         data = r.json().get("data") or []
         return [n.get("node") for n in data if n.get("node")]
 
-    # Password-based auth
     r = requests.post(
         f"{base_url}/access/ticket",
         data={"username": settings.PROXMOX_USER, "password": settings.PROXMOX_PASSWORD},

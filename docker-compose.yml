@@ -7,18 +7,16 @@ services:
     container_name: proxmox-dashboard-backend
     restart: unless-stopped
     environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+      - AWS_REGION=${AWS_REGION:-eu-west-1}
+      - AWS_SECRETS_SECRET_NAME=${AWS_SECRETS_SECRET_NAME:-syam-projectwork-pontos}
       - PORT=8000
-      - DB_HOST=${DB_HOST:?DB_HOST is required (set it in .env)}
-      - DB_PORT=${DB_PORT:-5432}
-      - DB_NAME=${DB_NAME:-postgres}
-      - DB_USER=${DB_USER:?DB_USER is required (set it in .env)}
-      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required (set it in .env)}
-      - DB_SSLMODE=${DB_SSLMODE:-require}
-      - DB_SSLROOTCERT=${DB_SSLROOTCERT:-}
-      - PROXMOX_USER=${PROXMOX_USER:-root@pam}
-      - PROXMOX_PASSWORD=${PROXMOX_PASSWORD:-}
-      - PROXMOX_TOKEN_NAME=${PROXMOX_TOKEN_NAME:-}
-      - PROXMOX_TOKEN_VALUE=${PROXMOX_TOKEN_VALUE:-}
+      - DEBUG=${DEBUG:-false}
+      - METRICS_POLL_INTERVAL=${METRICS_POLL_INTERVAL:-30}
+      - LOGS_POLL_INTERVAL=${LOGS_POLL_INTERVAL:-10}
+      - SERVICES_POLL_INTERVAL=${SERVICES_POLL_INTERVAL:-60}
       - PROXMOX_VERIFY_SSL=${PROXMOX_VERIFY_SSL:-false}
     networks:
       - dashboard-network

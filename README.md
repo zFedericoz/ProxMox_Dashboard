@@ -6,32 +6,70 @@ Dashboard di monitoraggio per cluster Proxmox con 3 nodi.
 
 - Docker >= 20.10
 - Docker Compose >= 2.0
-- PostgreSQL su AWS RDS raggiungibile (no DB locale)
+- AWS Secrets Manager (per le credenziali)
 
 ## Configurazione
 
-1. Copia `.env.example` in `.env` e modifica le credenziali (oppure aggiorna `docker-compose.yml` se preferisci tenere tutto lì):
+Tutte le credenziali sono centralizzate in AWS Secrets Manager (secret: `syam-projectwork-pontos`).
 
-```bash
-cp .env.example .env
-nano .env
+Il secret deve contenere:
+
+### Database PostgreSQL (RDS)
+| Chiave | Descrizione |
+|--------|-------------|
+| `DB_HOST` | Endpoint AWS RDS PostgreSQL |
+| `DB_PORT` | Porta database (default: 5432) |
+| `DB_NAME` | Nome database PostgreSQL |
+| `DB_USER` | Utente database PostgreSQL |
+| `DB_PASSWORD` | Password database PostgreSQL |
+
+### Proxmox API Token (multi-cluster)
+Per ogni cluster, aggiungi le chiavi:
+
+| Chiave | Descrizione |
+|--------|-------------|
+| `CLUSTER1_PROXMOX_TOKEN_NAME` | Nome token (es. `automation@pam!dashboard-token`) |
+| `CLUSTER1_PROXMOX_TOKEN_VALUE` | Valore del token |
+| `CLUSTER2_PROXMOX_TOKEN_NAME` | Nome token cluster 2 |
+| `CLUSTER2_PROXMOX_TOKEN_VALUE` | Valore token cluster 2 |
+
+### JWT Security
+| Chiave | Descrizione |
+|--------|-------------|
+| `SECRET_KEY` | Chiave segreta per JWT |
+
+### Esempio JSON Secret
+```json
+{
+  "DB_HOST": "syam-projectwork-pontos.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com",
+  "DB_PORT": "5432",
+  "DB_NAME": "postgres",
+  "DB_USER": "pontos",
+  "DB_PASSWORD": "your-db-password",
+  "SECRET_KEY": "your-jwt-secret-key",
+  "CLUSTER1_PROXMOX_TOKEN_NAME": "automation@pam!dashboard-token",
+  "CLUSTER1_PROXMOX_TOKEN_VALUE": "your-cluster1-token-value",
+  "CLUSTER2_PROXMOX_TOKEN_NAME": "automation@pam!prod-token",
+  "CLUSTER2_PROXMOX_TOKEN_VALUE": "your-cluster2-token-value"
+}
 ```
-
-2. Modifica almeno queste variabili:
-   - `DB_USER` - utente PostgreSQL RDS
-   - `DB_PASSWORD` - password PostgreSQL RDS
-   - `DB_NAME` - database PostgreSQL RDS
-   - `PROXMOX_PASSWORD` - Password del tuo server Proxmox
-   - `SECRET_KEY` - Chiave segreta per JWT (cambiala in produzione!)
 
 ## Avvio
 
 ```bash
-# Avvio
+# Avvio (AWS credentials devono essere disponibili come env vars)
 docker-compose up -d
 ```
 
-La dashboard sarà disponibile su: **http://localhost:8000**
+### Variabili ambiente (Docker Compose)
+
+| Variabile | Descrizione | Default |
+|-----------|-------------|---------|
+| `AWS_ACCESS_KEY_ID` | AWS Access Key | (required) |
+| `AWS_SECRET_ACCESS_KEY` | AWS Secret Key | (required) |
+| `AWS_SESSION_TOKEN` | AWS Session Token (se IAM temporaneo) | vuoto |
+| `AWS_REGION` | AWS Region | `eu-west-1` |
+| `AWS_SECRETS_SECRET_NAME` | Nome secret in Secrets Manager | `syam-projectwork-pontos` |
 
 ## Comandi Utili
 
@@ -63,38 +101,21 @@ proxmox-dashboard/
 │   ├── main.py
 │   ├── config.py
 │   ├── database.py
+│   ├── secrets.py          # AWS Secrets Manager integration
 │   └── proxmox_client.py
 ├── frontend/
 │   ├── Dockerfile
 │   ├── nginx.conf
 │   └── src/
 ├── docker-compose.yml
-├── .env.example
 └── .dockerignore
 ```
-
-## Variabili Environment
-
-| Variabile | Descrizione | Default |
-|-----------|-------------|---------|
-| `PORT` | Porta del server | 8000 |
-| `DB_HOST` | Endpoint AWS RDS PostgreSQL | `syam-progetto-aws-tpmdv.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com` |
-| `DB_PORT` | Porta database | `5432` |
-| `DB_NAME` | Nome database PostgreSQL | `postgres` |
-| `DB_USER` | Utente database PostgreSQL | `(required)` |
-| `DB_PASSWORD` | Password database PostgreSQL | `(required)` |
-| `DB_SSLMODE` | SSL mode connessione | `require` |
-| `DB_SSLROOTCERT` | CA bundle path (opzionale) | vuoto |
-| `PROXMOX_NODES` | Nodi Proxmox (JSON) | 3 nodi default |
-| `PROXMOX_USER` | Utente Proxmox | root@pam |
-| `PROXMOX_PASSWORD` | Password Proxmox | (richiesto) |
-| `SECRET_KEY` | Chiave JWT | (generato) |
-| `PROXMOX_VERIFY_SSL` | Verifica SSL | false |
 
 ## Produzione
 
 Per produzione, considera:
+- Usare IAM Role invece di Access Keys
 - Usare un reverse proxy (Traefik, Caddy)
 - Abilitare HTTPS
-- Database gestito su AWS RDS (no database locale)
-- Impostare CORS_ORIGINS correctly
+- Configurare VPC e security groups per RDS
+- Usare AWS Secrets Manager per tutte le credenziali

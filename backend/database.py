@@ -1,13 +1,10 @@
 """
 Database - PostgreSQL for Proxmox Dashboard.
-
-Use: psycopg2 with connection pooling for high-frequency logging.
 """
-import os
 import queue
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from contextlib import contextmanager
 from typing import Optional, List, Dict
 
@@ -15,39 +12,31 @@ import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 
-# Database connection settings
-DB_HOST = os.environ.get("DB_HOST", "syam-proxmox-dashboard-vmdtp.c9nj1x2p6gk5.eu-west-1.rds.amazonaws.com")
-DB_PORT = int(os.environ.get("DB_PORT", 5432))
-DB_NAME = os.environ.get("DB_NAME", "postgres")
-DB_USER = os.environ.get("DB_USER", "")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
-DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")
-DB_SSLROOTCERT = os.environ.get("DB_SSLROOTCERT", "")
+from config import settings
 
-# Connection pool
 _connection_pool = None
 
 def init_pool():
     """Initialize connection pool."""
     global _connection_pool
     if _connection_pool is None:
-        if not DB_HOST or not DB_HOST.strip():
-            raise RuntimeError("DB_HOST is empty. Set DB_HOST in the container environment (.env / docker-compose).")
-        if not DB_USER or not DB_USER.strip():
-            raise RuntimeError("DB_USER is empty. Set DB_USER in the container environment (.env / docker-compose).")
-        if not DB_PASSWORD or not DB_PASSWORD.strip():
-            raise RuntimeError("DB_PASSWORD is empty. Set DB_PASSWORD in the container environment (.env / docker-compose).")
+        if not settings.DB_HOST or not settings.DB_HOST.strip():
+            raise RuntimeError("DB_HOST is empty. Configure AWS Secrets Manager secret 'syam-projectwork-pontos'.")
+        if not settings.DB_USER or not settings.DB_USER.strip():
+            raise RuntimeError("DB_USER is empty. Configure AWS Secrets Manager secret 'syam-projectwork-pontos'.")
+        if not settings.DB_PASSWORD or not settings.DB_PASSWORD.strip():
+            raise RuntimeError("DB_PASSWORD is empty. Configure AWS Secrets Manager secret 'syam-projectwork-pontos'.")
 
         connect_kwargs = {
-            "host": DB_HOST,
-            "port": DB_PORT,
-            "database": DB_NAME,
-            "user": DB_USER,
-            "password": DB_PASSWORD,
-            "sslmode": DB_SSLMODE
+            "host": settings.DB_HOST,
+            "port": settings.DB_PORT,
+            "database": settings.DB_NAME,
+            "user": settings.DB_USER,
+            "password": settings.DB_PASSWORD,
+            "sslmode": settings.DB_SSLMODE
         }
-        if DB_SSLROOTCERT:
-            connect_kwargs["sslrootcert"] = DB_SSLROOTCERT
+        if settings.DB_SSLROOTCERT:
+            connect_kwargs["sslrootcert"] = settings.DB_SSLROOTCERT
 
         _connection_pool = pool.ThreadedConnectionPool(
             minconn=2,

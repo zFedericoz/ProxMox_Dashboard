@@ -1,23 +1,19 @@
-import os
 import bcrypt
 import psycopg2
+from config import settings
 
 
 def main() -> None:
-    sslmode = os.getenv("DB_SSLMODE", "require")
-    sslrootcert = os.getenv("DB_SSLROOTCERT", "")
-
     connect_kwargs = {
-        "host": os.getenv("DB_HOST"),
-        "port": os.getenv("DB_PORT"),
-        "database": os.getenv("DB_NAME"),
-        "user": os.getenv("DB_USER"),
-        "password": os.getenv("DB_PASSWORD"),
-        "sslmode": sslmode,
+        "host": settings.DB_HOST,
+        "port": settings.DB_PORT,
+        "database": settings.DB_NAME,
+        "user": settings.DB_USER,
+        "password": settings.DB_PASSWORD,
+        "sslmode": settings.DB_SSLMODE,
     }
-    # Only pass sslrootcert when provided (avoids "file does not exist" errors).
-    if sslrootcert:
-        connect_kwargs["sslrootcert"] = sslrootcert
+    if settings.DB_SSLROOTCERT:
+        connect_kwargs["sslrootcert"] = settings.DB_SSLROOTCERT
 
     conn = psycopg2.connect(**connect_kwargs)
     cur = conn.cursor()
