@@ -394,24 +394,31 @@ def create_proxmox_node(name: str, host: str, port: int = 8006, timeout: int = 8
         conn.close()
         return False
 
-def update_proxmox_node(name: str, **kwargs) -> bool:
+def update_proxmox_node(name: str, **kwargs) -> Optional[Dict]:
     allowed = {"host", "port", "timeout", "zone", "enabled"}
     kwargs = {k: v for k, v in kwargs.items() if k in allowed}
     if not kwargs:
-        return False
+        return None
     
     set_clause = ", ".join([f"{k} = %s" for k in kwargs.keys()])
     values = list(kwargs.values()) + [name]
     
     conn = get_db()
     try:
-        conn.execute(f"UPDATE proxmox_nodes SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE name = %s", values)
+        conn.execute(
+            f"UPDATE proxmox_nodes "
+            f"SET {set_clause}, updated_at = CURRENT_TIMESTAMP "
+            f"WHERE name = %s "
+            f"RETURNING *",
+            values,
+        )
+        row = conn.fetchone()
         conn.commit()
         conn.close()
-        return True
+        return dict(row) if row else None
     except Exception:
         conn.close()
-        return False
+        return None
 
 def delete_proxmox_node(name: str) -> bool:
     conn = get_db()

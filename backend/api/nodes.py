@@ -132,6 +132,17 @@ async def create_node(request: Request):
 async def update_node(node_name: str, request: Request):
     """Update a Proxmox node."""
     body = await request.json()
+    # Accept 0/1/"0"/"1" from the UI and coerce to bool for Postgres.
+    if "enabled" in body:
+        v = body.get("enabled")
+        if isinstance(v, str):
+            v = v.strip().lower()
+            if v in {"1", "true", "yes", "y", "on"}:
+                body["enabled"] = True
+            elif v in {"0", "false", "no", "n", "off"}:
+                body["enabled"] = False
+        elif isinstance(v, (int, float)):
+            body["enabled"] = bool(v)
     node = update_proxmox_node(node_name, **body)
     if not node:
         raise HTTPException(status_code=404, detail=f"Nodo '{node_name}' non trovato")

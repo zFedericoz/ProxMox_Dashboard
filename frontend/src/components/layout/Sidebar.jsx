@@ -45,7 +45,7 @@ export function Sidebar({ currentPage, onNavigate, collapsed, onToggleCollapse }
         {!collapsed && (
           <div className="flex items-center gap-2">
             <Zap className="w-6 h-6 text-cyan-400" />
-            <span className="font-bold text-white">PWD</span>
+            <span className="font-bold text-white">PWMO</span>
           </div>
         )}
         <button

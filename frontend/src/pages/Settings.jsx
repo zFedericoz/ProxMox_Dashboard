@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useApi, useApiAction } from '../hooks/useApi'
 import { Card, CardHeader, CardBody } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
@@ -17,8 +17,12 @@ export function Settings() {
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [nodeToDelete, setNodeToDelete] = useState(null)
 
-  const nodes = nodesData?.nodes || []
+  const [nodes, setNodes] = useState([])
   const clusterNodes = clusterData?.nodes || []
+
+  useEffect(() => {
+    if (nodesData?.nodes) setNodes(nodesData.nodes)
+  }, [nodesData])
 
   const [formData, setFormData] = useState({
     name: '',
@@ -84,10 +88,19 @@ export function Settings() {
   }
 
   const handleToggle = async (node) => {
-    const result = await apiExecute(`/api/nodes/${node.name}`, 'PUT', { enabled: node.enabled ? 0 : 1 })
+    const nextEnabled = !node.enabled
+
+    // Optimistic UI update: immediately reflect the new state in the toggle.
+    setNodes(prev => prev.map(n => (n.name === node.name ? { ...n, enabled: nextEnabled } : n)))
+
+    const result = await apiExecute(`/api/nodes/${node.name}`, 'PUT', { enabled: nextEnabled })
     if (result.success) {
-      toast.success(`Nodo ${node.enabled ? 'disabilitato' : 'abilitato'}`)
+      toast.success(`Nodo ${nextEnabled ? 'abilitato' : 'disabilitato'}`)
       refetch()
+    } else {
+      // Revert on failure
+      setNodes(prev => prev.map(n => (n.name === node.name ? { ...n, enabled: !nextEnabled } : n)))
+      toast.error(result.error || 'Errore aggiornamento nodo')
     }
   }
 

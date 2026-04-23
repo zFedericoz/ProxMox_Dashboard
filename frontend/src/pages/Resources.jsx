@@ -27,7 +27,7 @@ const fmt = {
 }
 
 export function Resources() {
-  const { data, loading, error, refetch, mutate } = useApi('/api/cluster/all', { refetchInterval: 60000 })
+  const { data, loading, error, refetch } = useApi('/api/cluster/all', { refetchInterval: 60000 })
   const { execute: apiExecute } = useApiAction()
   const toast = useToast()
   
@@ -112,7 +112,7 @@ export function Resources() {
       ? `/api/vms/${node}/${vmid}/${action}`
       : `/api/containers/${node}/${vmid}/${action}`
     
-    const result = await mutate(endpoint, 'POST')
+    const result = await apiExecute(endpoint, 'POST')
     if (result.success) {
       toast.success(`Azione ${action} inviata`)
       setTimeout(() => refetch(), 2000)
