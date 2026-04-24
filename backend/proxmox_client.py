@@ -15,7 +15,8 @@ import threading
 import urllib3
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor, as_completed, FIRST_COMPLETED
+from concurrent.futures import wait
 from requests.adapters import HTTPAdapter
 
 from config import settings
@@ -123,7 +124,7 @@ class ProxmoxNode:
                 f"{self.base_url}/access/ticket",
                 data={"username": settings.PROXMOX_USER,
                       "password": settings.PROXMOX_PASSWORD},
-                timeout=self.timeout
+                timeout=1
             )
             if resp.status_code == 200:
                 data = resp.json()["data"]
@@ -384,18 +385,16 @@ class ProxmoxCluster:
             print(f"⚠️ Cluster auto-discovery failed: {e}")
 
     def connect_all(self):
-        def _auth(item):
-            name, node = item
-            ok = node.authenticate()
-            return name, node, ok
-        futures = {_executor.submit(_auth, item): item[0] for item in self.nodes.items()}
-        for f in as_completed(futures, timeout=30):
+        if not self.nodes:
+            return
+        for name, node in self.nodes.items():
             try:
-                name, node, ok = f.result()
+                ok = node.authenticate()
                 print(f"  Node {name} ({node.host}): {'connected' if ok else 'failed'}")
                 if not ok: print(f"    Error: {node.last_error}")
             except Exception as e:
-                print(f"  Node {futures[f]}: exception: {e}")
+                print(f"  Node {name}: connection error ({type(e).__name__})")
+                node.connected = False
 
     def _refresh_node_data(self) -> None:
         """

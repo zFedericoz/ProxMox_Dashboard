@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     PROXMOX_USER: str = "root@pam"
     PROXMOX_PASSWORD: str = ""
+    PROXMOX_TOKEN_NAME: str = ""
+    PROXMOX_TOKEN_VALUE: str = ""
     PROXMOX_NODES: list = []
     PROXMOX_CLUSTERS: List[Dict[str, Any]] = []
     PROXMOX_VERIFY_SSL: bool = False
@@ -68,6 +70,8 @@ def _load_settings_from_secrets() -> Settings:
         SECRET_KEY=secrets.get("SECRET_KEY", ""),
         PROXMOX_USER=secrets.get("PROXMOX_USER", "root@pam"),
         PROXMOX_PASSWORD=secrets.get("PROXMOX_PASSWORD", ""),
+        PROXMOX_TOKEN_NAME=secrets.get("PROXMOX_TOKEN_NAME", ""),
+        PROXMOX_TOKEN_VALUE=secrets.get("PROXMOX_TOKEN_VALUE", ""),
         PROXMOX_CLUSTERS=get_cluster_proxmox_config(secrets),
     )
 

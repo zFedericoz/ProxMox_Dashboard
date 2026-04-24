@@ -24,6 +24,7 @@ def _fetch_cluster_node_names(host: str, port: int, timeout: int, cluster: dict 
     """
     Validate that the Proxmox API is reachable and credentials work.
     Returns the list of node names returned by /api2/json/nodes.
+    If Proxmox is unreachable, returns empty list (validation skipped).
     """
     base_url = f"https://{host}:{port}/api2/json"
     verify = bool(settings.PROXMOX_VERIFY_SSL)
@@ -31,40 +32,45 @@ def _fetch_cluster_node_names(host: str, port: int, timeout: int, cluster: dict 
     token_name = (cluster.get("token_name") if cluster else None) or settings.PROXMOX_TOKEN_NAME
     token_value = (cluster.get("token_value") if cluster else None) or settings.PROXMOX_TOKEN_VALUE
 
-    if token_name and token_value:
-        headers = {
-            "Authorization": (
-                f"PVEAPIToken={settings.PROXMOX_USER}!"
-                f"{token_name}={token_value}"
-            )
-        }
+    try:
+        if token_name and token_value:
+            headers = {
+                "Authorization": (
+                    f"PVEAPIToken={settings.PROXMOX_USER}!"
+                    f"{token_name}={token_value}"
+                )
+            }
+            r = requests.get(f"{base_url}/nodes", headers=headers, timeout=timeout, verify=verify)
+            if r.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"Proxmox nodes list failed: HTTP {r.status_code}")
+            data = r.json().get("data") or []
+            return [n.get("node") for n in data if n.get("node")]
+
+        r = requests.post(
+            f"{base_url}/access/ticket",
+            data={"username": settings.PROXMOX_USER, "password": settings.PROXMOX_PASSWORD},
+            timeout=timeout,
+            verify=verify,
+        )
+        if r.status_code == 401:
+            raise HTTPException(status_code=401, detail="Credenziali Proxmox non valide (401)")
+        if r.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Proxmox auth failed: HTTP {r.status_code}")
+
+        ticket = r.json().get("data", {}).get("ticket")
+        if not ticket:
+            raise HTTPException(status_code=502, detail="Proxmox auth failed: missing ticket")
+
+        headers = {"Cookie": f"PVEAuthCookie={ticket}"}
         r = requests.get(f"{base_url}/nodes", headers=headers, timeout=timeout, verify=verify)
         if r.status_code != 200:
             raise HTTPException(status_code=502, detail=f"Proxmox nodes list failed: HTTP {r.status_code}")
         data = r.json().get("data") or []
         return [n.get("node") for n in data if n.get("node")]
-
-    r = requests.post(
-        f"{base_url}/access/ticket",
-        data={"username": settings.PROXMOX_USER, "password": settings.PROXMOX_PASSWORD},
-        timeout=timeout,
-        verify=verify,
-    )
-    if r.status_code == 401:
-        raise HTTPException(status_code=401, detail="Credenziali Proxmox non valide (401)")
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Proxmox auth failed: HTTP {r.status_code}")
-
-    ticket = r.json().get("data", {}).get("ticket")
-    if not ticket:
-        raise HTTPException(status_code=502, detail="Proxmox auth failed: missing ticket")
-
-    headers = {"Cookie": f"PVEAuthCookie={ticket}"}
-    r = requests.get(f"{base_url}/nodes", headers=headers, timeout=timeout, verify=verify)
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Proxmox nodes list failed: HTTP {r.status_code}")
-    data = r.json().get("data") or []
-    return [n.get("node") for n in data if n.get("node")]
+    except requests.exceptions.ConnectTimeout:
+        return []
+    except requests.exceptions.ConnectionError:
+        return []
 
 
 @router.get("/api/nodes")
@@ -107,10 +113,10 @@ async def create_node(request: Request):
     zone = body.get("zone", "Default")
 
     # Validate node name against Proxmox API (prevents "offline" due to name mismatch).
+    # If Proxmox is unreachable, skip validation and allow adding node anyway.
     names = _fetch_cluster_node_names(host, int(port), int(timeout))
     requested_name = name
-    if name not in names:
-        # Allow users to paste FQDN (e.g. "dash.pontos") while Proxmox node name is often just "dash".
+    if names and name not in names:
         base = str(name).split(".")[0]
         if base in names:
             name = base
