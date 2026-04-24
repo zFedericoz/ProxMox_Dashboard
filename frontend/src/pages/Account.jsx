@@ -65,10 +65,15 @@ export function Account() {
       const result = await execute('/api/account/password', 'POST', {
         current_password: passwords.current,
         new_password: passwords.new,
+        confirm_password: passwords.confirm,
       })
       if (result.success) {
-        toast.success('Password cambiata con successo')
+        toast.success('Password cambiata con successo. Effettua il login con la nuova password.')
         setPasswords({ current: '', new: '', confirm: '' })
+        setTimeout(() => {
+          sessionStorage.removeItem('token')
+          window.location.href = '/login'
+        }, 1500)
       } else {
         toast.error(result.error || 'Errore cambio password')
       }

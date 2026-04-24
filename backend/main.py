@@ -1050,21 +1050,26 @@ async def update_account_profile(request: Request, current_user: dict = Depends(
         return {"success": True}
 
 @app.post("/api/account/password")
-async def change_account_password(request: Request):
+async def change_account_password(request: Request, current_user: dict = Depends(get_current_user)):
     body = await request.json()
-    username = body.get("username")
     current_password = body.get("current_password")
     new_password = body.get("new_password")
+    confirm_password = body.get("confirm_password")
     
-    if not username or not current_password or not new_password:
+    if not current_password or not new_password or not confirm_password:
         raise HTTPException(status_code=400, detail="Tutti i campi sono obbligatori")
+    
+    if new_password != confirm_password:
+        raise HTTPException(status_code=400, detail="Le password non corrispondono")
+    
+    username = current_user["sub"]
     
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE username = %s", (username,)).fetchone()
         if not user:
             raise HTTPException(status_code=404, detail="Utente non trovato")
         
-        if user["password_hash"] != hash_password(current_password):
+        if not verify_password(current_password, user["password_hash"]):
             log_activity(username, "Tentativo cambio password fallito", severity="warning")
             raise HTTPException(status_code=401, detail="Password attuale non corretta")
         

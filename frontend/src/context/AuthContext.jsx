@@ -11,8 +11,8 @@ export function AuthProvider({ children }) {
   const [token, setToken] = useState(null)
 
   useEffect(() => {
-    const storedToken = localStorage.getItem(TOKEN_KEY)
-    const storedUser = localStorage.getItem(USER_KEY)
+    const storedToken = sessionStorage.getItem(TOKEN_KEY)
+    const storedUser = sessionStorage.getItem(USER_KEY)
     if (storedToken && storedUser) {
       setToken(storedToken)
       setUser(JSON.parse(storedUser))
@@ -32,8 +32,8 @@ export function AuthProvider({ children }) {
       if (res.ok) {
         const data = await res.json()
         if (data.access_token) {
-          localStorage.setItem(TOKEN_KEY, data.access_token)
-          localStorage.setItem(USER_KEY, JSON.stringify({ username: data.username, role: data.role }))
+          sessionStorage.setItem(TOKEN_KEY, data.access_token)
+          sessionStorage.setItem(USER_KEY, JSON.stringify({ username: data.username, role: data.role }))
           setToken(data.access_token)
           setUser({ username: data.username, role: data.role })
           return { success: true }
@@ -58,8 +58,8 @@ export function AuthProvider({ children }) {
         }
       })
     } catch {}
-    localStorage.removeItem(TOKEN_KEY)
-    localStorage.removeItem(USER_KEY)
+    sessionStorage.removeItem(TOKEN_KEY)
+    sessionStorage.removeItem(USER_KEY)
     setToken(null)
     setUser(null)
   }, [token])
@@ -74,7 +74,7 @@ export function AuthProvider({ children }) {
       if (res.ok) {
         const data = await res.json()
         if (data.access_token) {
-          localStorage.setItem(TOKEN_KEY, data.access_token)
+          sessionStorage.setItem(TOKEN_KEY, data.access_token)
           setToken(data.access_token)
           return true
         }
