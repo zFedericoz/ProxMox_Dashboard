@@ -25,6 +25,140 @@ export function Backup() {
   const [snapToRestore, setSnapToRestore] = useState(null)
   const [restoreStart, setRestoreStart] = useState(false)
   const [restoring, setRestoring] = useState(false)
+  const [historyVm, setHistoryVm] = useState('')
+  const [backupHistory, setBackupHistory] = useState([])
+  const [snapshotHistory, setSnapshotHistory] = useState([])
+  const [backupHistoryLoading, setBackupHistoryLoading] = useState(false)
+  const [snapshotHistoryLoading, setSnapshotHistoryLoading] = useState(false)
+  const [backupHistoryWarning, setBackupHistoryWarning] = useState('')
+  const [snapshotHistoryWarning, setSnapshotHistoryWarning] = useState('')
+  const [selectedBackup, setSelectedBackup] = useState(null)
+  const [showDeleteBackup, setShowDeleteBackup] = useState(false)
+  const [showRestoreBackup, setShowRestoreBackup] = useState(false)
+  const [restoreTargetStorage, setRestoreTargetStorage] = useState('')
+  const [restoreStorageOptions, setRestoreStorageOptions] = useState([])
+  const [restoreStorageLoading, setRestoreStorageLoading] = useState(false)
+  const [restoreStorageWarning, setRestoreStorageWarning] = useState('')
+
+  const getBackupVtype = (volid) => {
+    return volid?.toLowerCase().includes('lxc') ? 'lxc' : 'qemu'
+  }
+
+  const loadRestoreStorageOptions = async (node, volid) => {
+    setRestoreStorageLoading(true)
+    setRestoreStorageWarning('')
+    try {
+      const vtype = getBackupVtype(volid)
+      const res = await fetch(`/api/backup/restore-storages/${encodeURIComponent(node)}?vtype=${encodeURIComponent(vtype)}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      })
+      if (!res.ok) {
+        const errorText = await res.text()
+        setRestoreStorageWarning(`Errore caricamento storage di restore: ${res.status} ${errorText}`)
+        setRestoreStorageOptions([])
+        setRestoreTargetStorage('')
+        return
+      }
+      const data = await res.json()
+      const options = data.storages || []
+      setRestoreStorageOptions(options)
+      setRestoreTargetStorage(options[0]?.storage || '')
+      if (!options.length) {
+        setRestoreStorageWarning(`Nessuno storage compatibile trovato per ${vtype} su nodo ${node}`)
+      }
+    } catch (e) {
+      setRestoreStorageWarning(`Errore caricamento storage di restore: ${e.message || e}`)
+      setRestoreStorageOptions([])
+      setRestoreTargetStorage('')
+    } finally {
+      setRestoreStorageLoading(false)
+    }
+  }
+
+  const openRestoreBackup = async (backup) => {
+    setSelectedBackup(backup)
+    setShowRestoreBackup(false)
+    await loadRestoreStorageOptions(backup.node, backup.volid)
+    setShowRestoreBackup(true)
+  }
+
+  const loadBackupHistory = async (node, vmid) => {
+    setBackupHistoryLoading(true)
+    setBackupHistoryWarning('')
+    try {
+      const res = await fetch(`/api/backup/history/${node}/${vmid}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      })
+      if (!res.ok) {
+        const errorText = await res.text()
+        setBackupHistoryWarning(`Errore nel caricamento dei backup: ${res.status} ${errorText}`)
+        setBackupHistory([])
+        return
+      }
+      const data = await res.json()
+      const backups = (data.backups || []).filter(item => item.type !== 'snapshot')
+      setBackupHistory(backups)
+      if (data.warning) setBackupHistoryWarning(data.warning)
+    } catch (e) {
+      setBackupHistoryWarning(`Errore nel caricamento dei backup: ${e.message || e}`)
+      setBackupHistory([])
+    } finally {
+      setBackupHistoryLoading(false)
+    }
+  }
+
+  const loadSnapshotHistory = async (node, vmid) => {
+    setSnapshotHistoryLoading(true)
+    setSnapshotHistoryWarning('')
+    const snapshots = []
+    try {
+      for (const vtype of ['qemu', 'lxc']) {
+        try {
+          const res = await fetch(`/api/snapshots/${node}/${vmid}?vtype=${vtype}`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+          })
+          if (!res.ok) continue
+          const data = await res.json()
+          const items = (data.snapshots || []).map(snap => ({
+            ...snap,
+            type: 'snapshot',
+            volid: snap.name || snap.snapname,
+            ctime: snap.snaptime || snap.ctime || snap.time,
+            vtype,
+            node,
+            storage: vtype
+          }))
+          snapshots.push(...items)
+        } catch (nestedError) {
+          // ignore individual vtype failures, continue with other type
+        }
+      }
+      setSnapshotHistory(snapshots.sort((a, b) => (b.ctime || 0) - (a.ctime || 0)))
+      if (snapshots.length === 0) {
+        setSnapshotHistoryWarning('Nessuno snapshot trovato per questa VM')
+      }
+    } catch (e) {
+      setSnapshotHistoryWarning('Errore nel caricamento degli snapshot')
+      setSnapshotHistory([])
+    } finally {
+      setSnapshotHistoryLoading(false)
+    }
+  }
+
+  const loadHistory = async (vmKey) => {
+    if (!vmKey) {
+      setBackupHistory([])
+      setSnapshotHistory([])
+      setBackupHistoryWarning('')
+      setSnapshotHistoryWarning('')
+      return
+    }
+    const [node, vmid] = vmKey.split('|')
+    await Promise.all([
+      loadBackupHistory(node, vmid),
+      loadSnapshotHistory(node, vmid)
+    ])
+  }
   
   const { data: allData, refetch } = useApi('/api/cluster/all', { refetchInterval: 30000 })
   const { data: storageData, refetch: refetchStorage } = useApi('/api/backup/storages')
@@ -92,6 +226,7 @@ export function Backup() {
     if (result.success) {
       toast.success('Snapshot eliminato')
       refetchSnapshots()
+      if (historyVm) loadHistory(historyVm)
     } else {
       toast.error(result.error || 'Errore eliminazione')
     }
@@ -114,9 +249,56 @@ export function Backup() {
       toast.success('Snapshot ripristinato con successo')
       setShowRestoreModal(false)
       setSnapToRestore(null)
+      if (historyVm) loadHistory(historyVm)
     } else {
       toast.error(result.error || 'Errore ripristino')
     }
+  }
+
+  const handleDeleteBackup = async () => {
+    if (!selectedBackup) return
+    const { node, storage, volid } = selectedBackup
+    const encodedVolid = encodeURIComponent(volid)
+    const result = await execute(`/api/backup/${node}/${storage}/${encodedVolid}`, 'DELETE')
+
+    if (result.success) {
+      toast.success('Backup eliminato')
+      if (historyVm) {
+        const [node, vmid] = historyVm.split('|')
+        loadBackupHistory(node, vmid)
+      }
+    } else {
+      toast.error(result.error || 'Errore eliminazione backup')
+    }
+    setShowDeleteBackup(false)
+    setSelectedBackup(null)
+  }
+
+  const handleRestoreBackup = async () => {
+    if (!selectedBackup) return
+    if (!restoreTargetStorage) {
+      toast.error('Seleziona uno storage di destinazione compatibile')
+      return
+    }
+    const { node, storage, volid } = selectedBackup
+    const vmid = selectedBackup.vmid || historyVm.split('|')[1]
+    const result = await execute(`/api/backup/${node}/${storage}/restore`, 'POST', {
+      volid,
+      vmid,
+      target_storage: restoreTargetStorage
+    })
+
+    if (result.success) {
+      toast.success('Ripristino avviato — controlla i task su Proxmox')
+      if (historyVm) {
+        const [node, vmid] = historyVm.split('|')
+        loadBackupHistory(node, vmid)
+      }
+    } else {
+      toast.error(result.error || 'Errore ripristino backup')
+    }
+    setShowRestoreBackup(false)
+    setSelectedBackup(null)
   }
 
   const openRestoreModal = (snap) => {
@@ -298,64 +480,170 @@ export function Backup() {
       )}
 
       {activeTab === 'history' && (
-        <Card noPadding>
-          <CardHeader>
-            <span>Tutti gli Snapshot ({snapshots.length})</span>
-          </CardHeader>
-          <CardBody className="p-0">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-gray-950 text-left">
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Nodo</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">VM</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Nome</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Tipo</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Data</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Azioni</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-800">
-                {snapshots.map((snap, i) => (
-                  <tr key={i} className="hover:bg-gray-800/50">
-                    <td className="px-4 py-3 font-mono text-cyan-400">{snap.node}</td>
-                    <td className="px-4 py-3">{snap.vm_name || snap.vmid}</td>
-                    <td className="px-4 py-3 font-mono">{snap.name}</td>
-                    <td className="px-4 py-3">{snap.vtype === 'qemu' ? 'VM' : 'LXC'}</td>
-                    <td className="px-4 py-3 text-gray-500 text-xs">
-                      {snap.snaptime ? new Date(snap.snaptime * 1000).toLocaleString('it-IT') : '-'}
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => openRestoreModal(snap)}
-                          className="p-1.5 text-green-400 hover:bg-green-900/50 rounded"
-                          title="Ripristina snapshot"
-                        >
-                          <RotateCcw size={14} />
-                        </button>
-                        {!snap.protected && (
-                          <button
-                            onClick={() => {
-                              setSnapToDelete({ node: snap.node, vmid: snap.vmid, snapname: snap.name })
-                              setShowDeleteConfirm(true)
-                            }}
-                            className="p-1.5 text-red-400 hover:bg-red-900/50 rounded"
-                            title="Elimina snapshot"
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>Seleziona VM per vedere i backup e gli snapshot</CardHeader>
+            <CardBody>
+              <Select
+                label="VM/CT"
+                value={historyVm}
+                onChange={(e) => { setHistoryVm(e.target.value); loadHistory(e.target.value) }}
+              >
+                <option value="">Seleziona...</option>
+                {vms.map(vm => (
+                  <option key={`${vm.node}|${vm.vmid}`} value={`${vm.node}|${vm.vmid}`}>
+                    [{vm.vmid}] {vm.name || vm.vmid} — {vm.node}
+                  </option>
                 ))}
-              </tbody>
-            </table>
-            {snapshots.length === 0 && (
-              <div className="p-8 text-center text-gray-500">Nessuno snapshot presente</div>
-            )}
-          </CardBody>
-        </Card>
+              </Select>
+              {(backupHistoryWarning || snapshotHistoryWarning) && (
+                <div className="mt-2 text-yellow-400 text-sm space-y-1">
+                  {backupHistoryWarning && <div>⚠️ {backupHistoryWarning}</div>}
+                  {snapshotHistoryWarning && <div>⚠️ {snapshotHistoryWarning}</div>}
+                </div>
+              )}
+            </CardBody>
+          </Card>
+
+          <div className="grid gap-4 xl:grid-cols-2">
+            <Card noPadding>
+              <CardHeader>Cronologia Backup PBS ({backupHistory.length})</CardHeader>
+              <CardBody className="p-0">
+                {backupHistoryLoading ? (
+                  <div className="p-6 text-center text-gray-400">Caricamento backup...</div>
+                ) : backupHistory.length === 0 ? (
+                  <div className="p-6 text-center text-gray-500">
+                    {historyVm ? 'Nessun backup trovato per questa VM' : 'Seleziona una VM'}
+                  </div>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-gray-950 text-left">
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Storage</th>
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">File</th>
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Dimensione</th>
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Data</th>
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Azioni</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800">
+                      {backupHistory.map((b, i) => (
+                        <tr key={i} className="hover:bg-gray-800/50">
+                          <td className="px-4 py-3 text-cyan-400">{b.storage}</td>
+                          <td className="px-4 py-3 font-mono text-xs text-gray-300">{b.volid?.split('/').pop() || b.volid}</td>
+                          <td className="px-4 py-3 text-gray-300">
+                            {(b.csize || b.size)
+                              ? `${((b.csize || b.size) / 1024 / 1024 / 1024).toFixed(2)} GB`
+                              : '—'}
+                          </td>
+                          <td className="px-4 py-3 text-gray-400">
+                            {b.ctime ? new Date(b.ctime * 1000).toLocaleString('it-IT') : '—'}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="w-9 h-9 p-0 flex items-center justify-center"
+                                onClick={() => openRestoreBackup({ ...b, vmid: historyVm.split('|')[1] })}
+                              >
+                                <RotateCcw size={14} />
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                className="w-9 h-9 p-0 flex items-center justify-center"
+                                onClick={() => {
+                                  setSelectedBackup({ ...b, vmid: historyVm.split('|')[1] })
+                                  setShowDeleteBackup(true)
+                                }}
+                              >
+                                <Trash2 size={14} />
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CardBody>
+            </Card>
+
+            <Card noPadding>
+              <CardHeader>Cronologia Snapshot ({snapshotHistory.length})</CardHeader>
+              <CardBody className="p-0">
+                {snapshotHistoryLoading ? (
+                  <div className="p-6 text-center text-gray-400">Caricamento snapshot...</div>
+                ) : snapshotHistory.length === 0 ? (
+                  <div className="p-6 text-center text-gray-500">
+                    {historyVm ? 'Nessuno snapshot trovato per questa VM' : 'Seleziona una VM'}
+                  </div>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-gray-950 text-left">
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Tipo</th>
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Snapshot</th>
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Dimensione</th>
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Data</th>
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Azioni</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800">
+                      {snapshotHistory.map((b, i) => (
+                        <tr key={i} className="hover:bg-gray-800/50">
+                          <td className="px-4 py-3 text-xs font-semibold uppercase text-gray-400">{b.vtype.toUpperCase()}</td>
+                          <td className="px-4 py-3 font-mono text-xs text-gray-300">{b.volid}</td>
+                          <td className="px-4 py-3 text-gray-300">{b.ctime ? '—' : '—'}</td>
+                          <td className="px-4 py-3 text-gray-400">
+                            {b.ctime ? new Date(b.ctime * 1000).toLocaleString('it-IT') : '—'}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="w-9 h-9 p-0 flex items-center justify-center"
+                                onClick={() => {
+                                  setSnapToRestore({
+                                    node: b.node,
+                                    vmid: historyVm.split('|')[1],
+                                    snapname: b.volid,
+                                    vtype: b.vtype || 'qemu'
+                                  })
+                                  setRestoreStart(false)
+                                  setShowRestoreModal(true)
+                                }}
+                              >
+                                <RotateCcw size={14} />
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                className="w-9 h-9 p-0 flex items-center justify-center"
+                                onClick={() => {
+                                  setSnapToDelete({
+                                    node: b.node,
+                                    vmid: historyVm.split('|')[1],
+                                    snapname: b.volid
+                                  })
+                                  setShowDeleteConfirm(true)
+                                }}
+                              >
+                                <Trash2 size={14} />
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CardBody>
+            </Card>
+          </div>
+        </div>
       )}
 
       <Modal
@@ -413,6 +701,50 @@ export function Backup() {
         message={`Sei sicuro di voler eliminare lo snapshot "${snapToDelete?.snapname}"? Questa azione non puo essere annullata.`}
         loading={actionLoading}
       />
+
+      <ConfirmModal
+        isOpen={showDeleteBackup}
+        onClose={() => { setShowDeleteBackup(false); setSelectedBackup(null) }}
+        onConfirm={handleDeleteBackup}
+        title="Elimina Backup"
+        message={`Sei sicuro di voler eliminare il backup "${selectedBackup?.volid?.split('/').pop()}"? Questa azione non puo essere annullata.`}
+        loading={actionLoading}
+      />
+
+      <Modal
+        isOpen={showRestoreBackup}
+        onClose={() => setShowRestoreBackup(false)}
+        title="Ripristina Backup"
+      >
+        <div className="space-y-4">
+          <p className="text-gray-400 text-sm">
+            Ripristino di: <span className="text-cyan-400 font-mono">{selectedBackup?.volid?.split('/').pop()}</span>
+          </p>
+          <Select
+            label="Storage di destinazione"
+            value={restoreTargetStorage}
+            onChange={(e) => setRestoreTargetStorage(e.target.value)}
+            disabled={restoreStorageLoading || !restoreStorageOptions.length}
+          >
+            {restoreStorageLoading ? (
+              <option value="">Caricamento...</option>
+            ) : restoreStorageOptions.length ? (
+              restoreStorageOptions.map(s => (
+                <option key={`${s.node}-${s.storage}`} value={s.storage}>{s.storage}</option>
+              ))
+            ) : (
+              <option value="">Nessuno storage compatibile</option>
+            )}
+          </Select>
+          {restoreStorageWarning && (
+            <div className="text-yellow-400 text-sm">{restoreStorageWarning}</div>
+          )}
+          <div className="flex gap-2 justify-end">
+            <Button variant="outline" onClick={() => setShowRestoreBackup(false)}>Annulla</Button>
+            <Button onClick={handleRestoreBackup}>Avvia ripristino</Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

@@ -7,6 +7,7 @@ import json
 import time
 import asyncio
 import threading
+import urllib.parse
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from pathlib import Path
@@ -736,6 +737,13 @@ async def get_storage():
             all_storage.append(item)
     return {"storage": all_storage}
 
+@app.post("/api/storage/refresh")
+async def refresh_storage():
+    cluster.invalidate_cache()
+    # Forza un nuovo caricamento dello storage alla richiesta successiva
+    cluster.get_storage_all()
+    return {"success": True}
+
 # ─── Routes: Snapshots ──────────────────────────────────────────────────────────
 @app.get("/api/snapshots/{node}/{vmid}")
 async def get_vm_snapshots(node: str, vmid: int, vtype: str = "qemu"):
@@ -820,6 +828,50 @@ async def get_all_snapshots():
     return {"snapshots": result, "count": len(result)}
 
 # ─── Routes: Backup ────────────────────────────────────────────────────────────
+
+@app.get("/api/backup/history/{node}/{vmid}")
+async def get_backup_history(node: str, vmid: int, storage: Optional[str] = None):
+    pnode = cluster.nodes.get(node)
+    if not pnode:
+        raise HTTPException(status_code=404, detail=f"Nodo '{node}' non trovato")
+    if not pnode.connected:
+        pnode.authenticate()
+    if not pnode.connected:
+        return {"backups": [], "count": 0, "warning": f"Nodo '{node}' non raggiungibile"}
+
+    all_storage = cluster.get_storage_all()
+    node_storages = all_storage.get(node, [])
+    backup_storages = [
+        s["storage"] for s in node_storages
+        if s.get("type") in ("pbs", "dir", "nfs", "cifs")
+        and s.get("enabled", True)
+    ] if not storage else [storage]
+
+    entries = []
+    warning = None
+
+    if not backup_storages:
+        warning = "Nessuno storage di tipo backup disponibile per questo nodo"
+
+    for stor in backup_storages:
+        try:
+            items = pnode.get_pbs_backups(vmid, stor)
+            for item in (items or []):
+                item["storage"] = stor
+                item["node"] = node
+                item["type"] = "backup"
+                item["volid"] = item.get("volid") or item.get("name")
+                item["ctime"] = item.get("ctime") or item.get("time") or item.get("backup_time")
+                entries.append(item)
+        except Exception as e:
+            warning = warning or f"Storage '{stor}' non raggiungibile: {str(e)}"
+
+    entries.sort(key=lambda x: x.get("ctime", 0), reverse=True)
+    result = {"backups": entries, "count": len(entries)}
+    if warning:
+        result["warning"] = warning
+    return result
+
 @app.get("/api/backup/jobs")
 async def get_backup_jobs():
     jobs = cluster.get_backup_jobs()
@@ -856,6 +908,80 @@ async def get_backup_storages():
                 item["node"] = node_name
                 backup_storages.append(item)
     return {"storages": backup_storages}
+
+@app.get("/api/backup/restore-storages/{node}")
+async def get_restore_storages(node: str, vtype: str = "qemu"):
+    """
+    Restituisce solo gli storage del nodo specificato compatibili
+    con il restore: devono supportare 'images' (qemu) o 'rootdir' (lxc).
+    """
+    storage = cluster.get_storage_all()
+    node_items = storage.get(node, [])
+    required_content = "rootdir" if vtype == "lxc" else "images"
+    compatible = []
+    for item in node_items:
+        content = item.get("content", "")
+        if required_content in content:
+            compatible.append({
+                "storage": item.get("storage") or item.get("id"),
+                "type": item.get("type"),
+                "content": content,
+                "node": node,
+            })
+    return {"storages": compatible}
+
+@app.delete("/api/backup/{node}/{storage}/{volid:path}")
+async def delete_backup(node: str, storage: str, volid: str, request: Request):
+    pnode = cluster.nodes.get(node)
+    if not pnode:
+        raise HTTPException(status_code=404, detail=f"Nodo '{node}' non trovato")
+    if not pnode.connected:
+        pnode.authenticate()
+    if not pnode.connected:
+        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
+    try:
+        result = pnode._delete(f"/nodes/{node}/storage/{storage}/content/{volid}")
+        if result is None:
+            raise HTTPException(status_code=500, detail=pnode.last_error or "Errore eliminazione backup")
+        log_activity("admin", f"Backup eliminato: {volid} su {storage}",
+                     node=node, severity="warning")
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/backup/{node}/{storage}/restore")
+async def restore_backup(node: str, storage: str, request: Request):
+    body = await request.json()
+    volid = body.get("volid")
+    vmid = body.get("vmid")
+    target_storage = body.get("target_storage", "local")
+    if not volid or not vmid:
+        raise HTTPException(status_code=400, detail="volid e vmid sono obbligatori")
+    pnode = cluster.nodes.get(node)
+    if not pnode:
+        raise HTTPException(status_code=404, detail=f"Nodo '{node}' non trovato")
+    if not pnode.connected:
+        pnode.authenticate()
+    if not pnode.connected:
+        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
+    try:
+        # Proxmox API: restore = POST /nodes/{node}/qemu (o /lxc), stesso endpoint
+        # della creazione VM con il param 'archive' che punta al volid del backup.
+        vtype = "lxc" if "lxc" in volid.lower() else "qemu"
+        result = pnode._post(f"/nodes/{node}/{vtype}", {
+            "vmid": vmid,
+            "archive": volid,
+            "storage": target_storage,
+            "force": 1,
+        })
+        if result is None:
+            raise HTTPException(status_code=500, detail=pnode.last_error or "Errore ripristino")
+        cluster.invalidate_cache()
+        log_activity("admin", f"Backup ripristinato: {volid} → vmid {vmid}",
+                     node=node, severity="warning")
+        return {"success": True, "task": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ─── Routes: Budget ───────────────────────────────────────────────────────────
 @app.get("/api/budget")

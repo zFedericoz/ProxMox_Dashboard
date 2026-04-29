@@ -196,6 +196,30 @@ class ProxmoxNode:
             self.last_error = str(e)
             return None
 
+    def _delete(self, path: str) -> Optional[Any]:
+        try:
+            resp = self.session.delete(
+                f"{self.base_url}{path}",
+                headers=self._auth_header(),
+                timeout=self.timeout
+            )
+            if resp.status_code == 401:
+                if self.authenticate():
+                    resp = self.session.delete(
+                        f"{self.base_url}{path}",
+                        headers=self._auth_header(),
+                        timeout=self.timeout
+                    )
+            if resp.status_code in (200, 202):
+                return resp.json().get("data")
+            try:   detail = resp.json()
+            except Exception: detail = resp.text[:300]
+            self.last_error = f"DELETE {path} failed: {resp.status_code} {detail}"
+            return None
+        except Exception as e:
+            self.last_error = str(e)
+            return None
+
     # ── API shortcuts ──────────────────────────────────────────────────────
     def get_node_status(self)          -> Optional[Dict]: return self._get(f"/nodes/{self.name}/status")
     def get_node_rrd(self, tf="hour")  -> Optional[List]: return self._get(f"/nodes/{self.name}/rrddata", {"timeframe": tf, "cf": "AVERAGE"})
@@ -255,11 +279,12 @@ class ProxmoxNode:
         })
 
     def create_backup(self, vmid: int, storage: str, mode: str = "snapshot", vtype: str = "qemu") -> Optional[Any]:
-        return self._post(f"/nodes/{self.name}/{vtype}/{vmid}/backup", {
+        return self._post(f"/nodes/{self.name}/vzdump", {
+            "vmid": vmid,
             "storage": storage,
             "mode": mode,
             "compress": "zstd",
-            "notification": "always"
+            "remove": 0
         })
 
     def get_backup_jobs(self) -> List[Dict]:
@@ -267,6 +292,13 @@ class ProxmoxNode:
 
     def get_backup_logs(self, vmid: Optional[int] = None, limit: int = 50) -> List[Dict]:
         return self._get("/cluster/log", {"limit": limit}) or []
+    
+    def get_pbs_backups(self, vmid: int, storage: str) -> List[Dict]:
+        try:
+            return self._get(f"/nodes/{self.name}/storage/{storage}/content",
+                            {"content": "backup", "vmid": vmid}) or []
+        except Exception:
+            return []
 
     def fetch_all(self) -> Dict:
         """Fetcha status + vms + containers in parallelo per questo nodo."""

@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react'
-import { useApi } from '../hooks/useApi'
+import { useApi, useApiAction } from '../hooks/useApi'
 import { Card, CardHeader, CardBody } from '../components/ui/Card'
 import { StatusBadge } from '../components/ui/Badge'
+import { useToast } from '../components/ui/Toast'
 import { HardDrive, Search, ChevronUp, ChevronDown, Filter, X } from 'lucide-react'
 
 const fmt = {
@@ -15,6 +16,8 @@ const fmt = {
 }
 
 export function Storage() {
+  const toast = useToast()
+  const { execute, loading: refreshLoading } = useApiAction()
   const { data: storageData, refetch } = useApi('/api/storage', { refetchInterval: 60000 })
   
   const [showFilters, setShowFilters] = useState(false)
@@ -89,6 +92,16 @@ export function Storage() {
     setFilterType('')
   }
 
+  const handleRefreshStorage = async () => {
+    const result = await execute('/api/storage/refresh', 'POST')
+    if (result.success) {
+      toast.success('Storage refresh richiesto')
+      refetch()
+    } else {
+      toast.error(result.error || 'Errore aggiornamento storage')
+    }
+  }
+
   const hasActiveFilters = search || filterNode || filterType
 
   const totalUsed = useMemo(() => {
@@ -140,10 +153,11 @@ export function Storage() {
             Filtri
           </button>
           <button
-            onClick={() => refetch()}
+            onClick={handleRefreshStorage}
             className="px-4 py-2 bg-gray-800 text-gray-300 hover:bg-gray-700 rounded-lg transition-colors"
+            disabled={refreshLoading}
           >
-            Aggiorna
+            {refreshLoading ? 'Aggiornamento...' : 'Aggiorna'}
           </button>
         </div>
       </div>
