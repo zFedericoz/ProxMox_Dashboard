@@ -124,7 +124,7 @@ class ProxmoxNode:
                 f"{self.base_url}/access/ticket",
                 data={"username": settings.PROXMOX_USER,
                       "password": settings.PROXMOX_PASSWORD},
-                timeout=1
+                timeout=self.timeout
             )
             if resp.status_code == 200:
                 data = resp.json()["data"]

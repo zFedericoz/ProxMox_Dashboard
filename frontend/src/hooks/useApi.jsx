@@ -62,10 +62,15 @@ export function useApi(endpoint, options = {}) {
   const { getAuthHeader } = useAuth()
   const abortControllerRef = useRef(null)
   const lastFetchTimeRef = useRef(0)
+  const dataRef = useRef(null)
   
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(immediate)
   const [error, setError] = useState(null)
+
+  useEffect(() => {
+    dataRef.current = data
+  }, [data])
 
   const buildUrl = useCallback(() => {
     const url = new URL(endpoint, window.location.origin)
@@ -92,7 +97,7 @@ export function useApi(endpoint, options = {}) {
     
     // Fast path: serve cache even if local state is empty (e.g. first render)
     if (!force && cached && (now - lastFetchTimeRef.current) < staleTime) {
-      if (data !== cached) setData(cached)
+      if (dataRef.current !== cached) setData(cached)
       return { success: true, data: cached, cached: true }
     }
     
@@ -122,7 +127,7 @@ export function useApi(endpoint, options = {}) {
 
     if (showLoading) setLoading(false)
     return result
-  }, [buildUrl, buildHeaders, staleTime, data])
+  }, [buildUrl, buildHeaders, staleTime])
 
   const mutate = useCallback(async (method = 'GET', body = null) => {
     setLoading(true)
