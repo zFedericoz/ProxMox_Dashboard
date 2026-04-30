@@ -1,11 +1,11 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useApi, useApiAction } from '../hooks/useApi'
 import { Card, CardHeader, CardBody, CardStat } from '../components/ui/Card'
 import { StatusBadge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { useToast } from '../components/ui/Toast'
 import { ConfirmModal, Modal } from '../components/ui/Modal'
-import { Download, Upload, Server, Cpu, HardDrive, MemoryStick, Clock, RefreshCw, Search, ChevronUp, ChevronDown, Filter, X, ArrowRight } from 'lucide-react'
+import { Download, Upload, Server, Cpu, HardDrive, MemoryStick, Clock, RefreshCw, Search, ChevronUp, ChevronDown, Filter, X, ArrowRight, Layers } from 'lucide-react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 
 const fmt = {
@@ -27,7 +27,21 @@ const fmt = {
 }
 
 export function Resources() {
-  const { data, loading, error, refetch } = useApi('/api/cluster/all', { refetchInterval: 60000 })
+  const { data: clustersData } = useApi('/api/clusters', { refetchInterval: 30000 })
+  const [selectedClusterId, setSelectedClusterId] = useState(null)
+  const clusters = clustersData?.clusters || []
+
+  // Auto-select first cluster when clusters load
+  useEffect(() => {
+    if (clusters.length > 0 && selectedClusterId === null) {
+      setSelectedClusterId(clusters[0].id)
+    }
+  }, [clusters])
+
+  const apiEndpoint = selectedClusterId
+    ? `/api/cluster/all?cluster_id=${selectedClusterId}`
+    : '/api/cluster/all'
+  const { data, loading, error, refetch } = useApi(apiEndpoint, { refetchInterval: 60000 })
   const { execute: apiExecute } = useApiAction()
   const toast = useToast()
   
@@ -245,6 +259,26 @@ export function Resources() {
 
   return (
     <div className="space-y-6">
+      {/* Cluster tabs */}
+      {clusters.length > 0 && (
+        <div className="flex gap-1 border-b border-gray-800 overflow-x-auto">
+          {clusters.map(c => (
+            <button
+              key={c.id}
+              onClick={() => setSelectedClusterId(c.id)}
+              className={`flex items-center gap-2 px-5 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+                c.id === selectedClusterId
+                  ? 'border-cyan-400 text-white bg-gray-800/40'
+                  : 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-800/20'
+              }`}
+            >
+              <Layers size={14} />
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div className="flex gap-2">
           <button

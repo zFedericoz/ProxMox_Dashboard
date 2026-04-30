@@ -34,8 +34,10 @@ from database import (
     get_proxmox_nodes, get_proxmox_node, create_proxmox_node, update_proxmox_node, delete_proxmox_node
 )
 from proxmox_client import cluster, reload_nodes, init_cluster_from_db
+from database import init_clusters_table
 from api.nodes import router as nodes_router
 from api.alerts import router as alerts_router
+from api.clusters import router as clusters_router
 
 # ─── App Setup ────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -48,6 +50,7 @@ app = FastAPI(
 # Routers
 app.include_router(nodes_router)
 app.include_router(alerts_router)
+app.include_router(clusters_router)
 
 # Rate limiter setup
 limiter = Limiter(key_func=get_remote_address)
@@ -199,21 +202,34 @@ def _generate_etag(data: Dict) -> str:
     return f'"{hash(str(data)) % 0xFFFFFFFF:x}"'
 
 
+def _invalidate_all_cache():
+    """Invalida tutta la cache di risposta (chiamato dopo mutation)."""
+    global _response_cache
+    with _cache_lock:
+        _response_cache.clear()
+
+
 @app.middleware("http")
 async def api_cache_middleware(request: Request, call_next):
     if request.method != "GET" or not request.url.path.startswith("/api/"):
-        return await call_next(request)
-    
-    cache_key = request.url.path
+        # Non-GET: esegui la mutation e poi invalida la cache
+        response = await call_next(request)
+        if request.method in ("POST", "PUT", "DELETE", "PATCH") and request.url.path.startswith("/api/"):
+            _invalidate_all_cache()
+        return response
+
+    # Cache key includes query params so /api/cluster/all?cluster_id=1 and
+    # /api/cluster/all?cluster_id=2 are cached separately
+    cache_key = str(request.url)
     cached = _get_cached_response(cache_key)
-    
+
     if cached:
         client_etag = request.headers.get("If-None-Match")
         if client_etag and client_etag == cached.get("etag"):
             return JSONResponse(status_code=304, content=None)
-    
+
     response = await call_next(request)
-    
+
     if response.status_code == 200 and hasattr(response, "body"):
         try:
             body = response.body
@@ -225,7 +241,7 @@ async def api_cache_middleware(request: Request, call_next):
                 response.headers["Cache-Control"] = "public, max-age=10"
         except Exception:
             pass
-    
+
     return response
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
@@ -371,6 +387,7 @@ def ensure_default_users():
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    init_clusters_table()
     ensure_default_users()
     _load_frontend_html()
     print(f"\n{'='*50}")
@@ -476,9 +493,14 @@ async def get_drs_recommendations():
     return cluster.get_drs_recommendations()
 
 @app.get("/api/cluster/placement")
-async def get_vm_placement_suggestion():
-    """Get suggested best node for VM placement."""
-    return cluster.get_vm_placement_suggestion()
+async def get_vm_placement_suggestion(cluster_id: Optional[int] = None):
+    """Get suggested best node for VM placement. Se cluster_id è fornito, filtra ai soli nodi di quel cluster."""
+    node_filter = None
+    if cluster_id is not None:
+        from database import get_proxmox_nodes_with_cluster
+        all_nodes = get_proxmox_nodes_with_cluster()
+        node_filter = {n["name"] for n in all_nodes if n.get("cluster_id") == cluster_id}
+    return cluster.get_vm_placement_suggestion(node_filter=node_filter)
 
 @app.get("/api/cluster/vms")
 async def get_vms(node: Optional[str] = None):
@@ -502,17 +524,95 @@ async def get_resources():
             "total_vms": len(vms), "total_containers": len(cts)}
 
 @app.get("/api/cluster/all")
-async def get_cluster_all():
+async def get_cluster_all(cluster_id: Optional[int] = None):
     """
     Endpoint aggregato: summary + vms + containers in una sola chiamata.
     La cache è condivisa — zero refresh duplicati.
+    Se cluster_id è fornito, filtra vms/containers ai soli nodi di quel cluster.
     """
     summary = cluster.get_cluster_summary()   # aggiorna cache se stale
     vms     = cluster.get_all_vms()           # legge dalla stessa cache
     cts     = cluster.get_all_containers()    # idem
+
+    if cluster_id is not None:
+        from database import get_proxmox_nodes
+        nodes_in_cluster = get_proxmox_nodes(enabled_only=True)
+        # We need cluster_id mapping — query with cluster info
+        from database import get_proxmox_nodes_with_cluster
+        all_nodes = get_proxmox_nodes_with_cluster()
+        cluster_node_names = {n["name"] for n in all_nodes if n.get("cluster_id") == cluster_id}
+        vms = [v for v in vms if v.get("node") in cluster_node_names]
+        cts = [c for c in cts if c.get("node") in cluster_node_names]
+
     return {"summary": summary, "vms": vms, "containers": cts}
 
 # ─── Routes: VM / Container Power Actions ─────────────────────────────────────
+VALID_VM_ACTIONS  = {"start", "stop", "shutdown", "reboot", "reset", "suspend", "resume"}
+VALID_CT_ACTIONS  = {"start", "stop", "shutdown", "reboot", "suspend", "resume"}
+
+@app.post("/api/vms/{node}/{vmid}/{action}")
+async def vm_power_action(node: str, vmid: int, action: str, request: Request):
+    if action not in VALID_VM_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"Azione non valida: {action}. Valori ammessi: {sorted(VALID_VM_ACTIONS)}")
+    pnode = cluster.nodes.get(node)
+    if not pnode:
+        raise HTTPException(status_code=404, detail=f"Nodo '{node}' non trovato")
+    if not pnode.connected:
+        pnode.authenticate()
+    if not pnode.connected:
+        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
+    result = pnode.vm_action(vmid, action)
+    if result is None:
+        err_msg = pnode.last_error or "Errore sconosciuto"
+        if "quorum" in err_msg.lower():
+            import proxmox_client as _pc
+            ok, msg = _pc.fix_quorum(pnode.host)
+            if ok:
+                result = pnode.vm_action(vmid, action)
+                if result is None:
+                    raise HTTPException(status_code=500, detail=pnode.last_error or "Errore dopo fix quorum")
+            else:
+                raise HTTPException(status_code=500, detail=f"Quorum fix fallito: {msg}")
+        else:
+            raise HTTPException(status_code=500, detail=err_msg)
+    # Invalida cache: il prossimo refresh leggerà lo stato aggiornato
+    cluster.invalidate_cache()
+    ip = request.client.host if request.client else None
+    log_activity("admin", f"VM {vmid} on {node}: {action}", ip_address=ip,
+                 severity="warning" if action in ("stop","shutdown","reset") else "info")
+    return {"success": True, "task": result, "node": node, "vmid": vmid, "action": action}
+
+@app.post("/api/containers/{node}/{vmid}/{action}")
+async def ct_power_action(node: str, vmid: int, action: str, request: Request):
+    if action not in VALID_CT_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"Azione non valida: {action}. Valori ammessi: {sorted(VALID_CT_ACTIONS)}")
+    pnode = cluster.nodes.get(node)
+    if not pnode:
+        raise HTTPException(status_code=404, detail=f"Nodo '{node}' non trovato")
+    if not pnode.connected:
+        pnode.authenticate()
+    if not pnode.connected:
+        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
+    result = pnode.ct_action(vmid, action)
+    if result is None:
+        err_msg = pnode.last_error or "Errore sconosciuto"
+        if "quorum" in err_msg.lower():
+            import proxmox_client as _pc
+            ok, msg = _pc.fix_quorum(pnode.host)
+            if ok:
+                result = pnode.ct_action(vmid, action)
+                if result is None:
+                    raise HTTPException(status_code=500, detail=pnode.last_error or "Errore dopo fix quorum")
+            else:
+                raise HTTPException(status_code=500, detail=f"Quorum fix fallito: {msg}")
+        else:
+            raise HTTPException(status_code=500, detail=err_msg)
+    cluster.invalidate_cache()
+    ip = request.client.host if request.client else None
+    log_activity("admin", f"CT {vmid} on {node}: {action}", ip_address=ip,
+                 severity="warning" if action in ("stop","shutdown") else "info")
+    return {"success": True, "task": result, "node": node, "vmid": vmid, "action": action}
+
 @app.post("/api/vms/{node}/{vmid}/migrate")
 async def migrate_vm(node: str, vmid: int, request: Request):
     """Migra una VM a un altro nodo."""
@@ -590,71 +690,6 @@ async def migrate_container(node: str, vmid: int, request: Request):
     log_activity("admin", f"CT {vmid} migrato da {node} a {target_node}", 
                  resource=f"lxc:{vmid}", node=node, ip_address=ip, severity="warning")
     return {"success": True, "task": result, "source": node, "target": target_node, "vmid": vmid}
-
-VALID_VM_ACTIONS  = {"start", "stop", "shutdown", "reboot", "reset", "suspend", "resume"}
-VALID_CT_ACTIONS  = {"start", "stop", "shutdown", "reboot", "suspend", "resume"}
-
-@app.post("/api/vms/{node}/{vmid}/{action}")
-async def vm_power_action(node: str, vmid: int, action: str, request: Request):
-    if action not in VALID_VM_ACTIONS:
-        raise HTTPException(status_code=400, detail=f"Azione non valida: {action}. Valori ammessi: {sorted(VALID_VM_ACTIONS)}")
-    pnode = cluster.nodes.get(node)
-    if not pnode:
-        raise HTTPException(status_code=404, detail=f"Nodo '{node}' non trovato")
-    if not pnode.connected:
-        pnode.authenticate()
-    if not pnode.connected:
-        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
-    result = pnode.vm_action(vmid, action)
-    if result is None:
-        err_msg = pnode.last_error or "Errore sconosciuto"
-        if "quorum" in err_msg.lower():
-            import proxmox_client as _pc
-            ok, msg = _pc.fix_quorum(pnode.host)
-            if ok:
-                result = pnode.vm_action(vmid, action)
-                if result is None:
-                    raise HTTPException(status_code=500, detail=pnode.last_error or "Errore dopo fix quorum")
-            else:
-                raise HTTPException(status_code=500, detail=f"Quorum fix fallito: {msg}")
-        else:
-            raise HTTPException(status_code=500, detail=err_msg)
-    cluster.invalidate_cache()
-    ip = request.client.host if request.client else None
-    log_activity("admin", f"VM {vmid} on {node}: {action}", ip_address=ip,
-                 severity="warning" if action in ("stop","shutdown","reset") else "info")
-    return {"success": True, "task": result, "node": node, "vmid": vmid, "action": action}
-
-@app.post("/api/containers/{node}/{vmid}/{action}")
-async def ct_power_action(node: str, vmid: int, action: str, request: Request):
-    if action not in VALID_CT_ACTIONS:
-        raise HTTPException(status_code=400, detail=f"Azione non valida: {action}. Valori ammessi: {sorted(VALID_CT_ACTIONS)}")
-    pnode = cluster.nodes.get(node)
-    if not pnode:
-        raise HTTPException(status_code=404, detail=f"Nodo '{node}' non trovato")
-    if not pnode.connected:
-        pnode.authenticate()
-    if not pnode.connected:
-        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
-    result = pnode.ct_action(vmid, action)
-    if result is None:
-        err_msg = pnode.last_error or "Errore sconosciuto"
-        if "quorum" in err_msg.lower():
-            import proxmox_client as _pc
-            ok, msg = _pc.fix_quorum(pnode.host)
-            if ok:
-                result = pnode.ct_action(vmid, action)
-                if result is None:
-                    raise HTTPException(status_code=500, detail=pnode.last_error or "Errore dopo fix quorum")
-            else:
-                raise HTTPException(status_code=500, detail=f"Quorum fix fallito: {msg}")
-        else:
-            raise HTTPException(status_code=500, detail=err_msg)
-    cluster.invalidate_cache()
-    ip = request.client.host if request.client else None
-    log_activity("admin", f"CT {vmid} on {node}: {action}", ip_address=ip,
-                 severity="warning" if action in ("stop","shutdown") else "info")
-    return {"success": True, "task": result, "node": node, "vmid": vmid, "action": action}
 
 # ─── Routes: Metrics History ──────────────────────────────────────────────────
 @app.get("/api/metrics/history")

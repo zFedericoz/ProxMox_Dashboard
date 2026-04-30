@@ -19,23 +19,13 @@ AWS_REGION = os.environ.get("AWS_REGION", "eu-west-1")
 
 
 def get_secrets_manager_client():
-    client_kwargs = {
-        "region_name": os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or AWS_REGION,
-    }
-
-    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
-    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-    session_token = os.environ.get("AWS_SESSION_TOKEN")
-
-    if access_key and secret_key:
-        client_kwargs["aws_access_key_id"] = access_key
-        client_kwargs["aws_secret_access_key"] = secret_key
-
-    # Pass the session token only for temporary STS credentials.
-    if session_token:
-        client_kwargs["aws_session_token"] = session_token
-
-    client = boto3.client("secretsmanager", **client_kwargs)
+    client = boto3.client(
+        "secretsmanager",
+        region_name=AWS_REGION,
+        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
+    )
     return client
 
 

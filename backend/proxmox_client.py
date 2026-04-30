@@ -124,7 +124,7 @@ class ProxmoxNode:
                 f"{self.base_url}/access/ticket",
                 data={"username": settings.PROXMOX_USER,
                       "password": settings.PROXMOX_PASSWORD},
-                timeout=self.timeout
+                timeout=1
             )
             if resp.status_code == 200:
                 data = resp.json()["data"]
@@ -888,26 +888,29 @@ class ProxmoxCluster:
         
         return recommendations
 
-    def get_vm_placement_suggestion(self, vm_vmid: int = None, vm_type: str = "qemu") -> Dict:
-        """Suggerisce il nodo migliore per una nuova VM o per una VM specifica."""
+    def get_vm_placement_suggestion(self, vm_vmid: int = None, vm_type: str = "qemu", node_filter: set = None) -> Dict:
+        """Suggerisce il nodo migliore per una nuova VM o per una VM specifica.
+        Se node_filter è fornito, considera solo i nodi in quel set."""
         suggestions = {
             "current": None,
             "recommended": None,
             "nodes": []
         }
-        
+
         node_scores = []
-        
+
         for name, d in _node_data_cache.items():
+            if node_filter and name not in node_filter:
+                continue
             if d.get("status") != "online":
                 continue
-            
+
             cpu_available = 100 - d.get("cpu_usage", 0)
             mem_available = 100 - d.get("mem_percent", 0)
             disk_available = 100 - d.get("disk_percent", 0)
-            
+
             score = (cpu_available * 0.3) + (mem_available * 0.4) + (disk_available * 0.3)
-            
+
             node_scores.append({
                 "name": name,
                 "score": round(score, 1),
@@ -916,14 +919,14 @@ class ProxmoxCluster:
                 "disk_available": round(disk_available, 1),
                 "current_vm_count": d.get("vm_count", 0) + d.get("ct_count", 0)
             })
-        
+
         node_scores.sort(key=lambda x: x["score"], reverse=True)
-        
+
         suggestions["nodes"] = node_scores
         if node_scores:
             suggestions["recommended"] = node_scores[0]
             suggestions["recommended"]["reason"] = "Miglior bilanciamento risorse"
-        
+
         return suggestions
 
     def save_metrics_snapshot(self):
@@ -1065,62 +1068,91 @@ cluster = ProxmoxCluster()
 def reload_nodes():
     """
     Ricarica i nodi dal database e reconnette.
-    Chiamato dopo CRUD su proxmox_nodes.
+    Chiamato dopo CRUD su proxmox_nodes e clusters.
     """
     global cluster
-    from database import get_proxmox_nodes
+    from database import get_proxmox_nodes, get_proxmox_nodes_with_cluster, get_clusters
+    from config import settings
+
+    # Reload cluster configs from DB and settings
+    clusters_db = get_clusters()
+    cluster._active_cluster = None
+    if settings.PROXMOX_CLUSTERS:
+        cluster._active_cluster = settings.PROXMOX_CLUSTERS[0]
+
     nodes_db = get_proxmox_nodes(enabled_only=True)
-    
+    all_nodes = get_proxmox_nodes_with_cluster()
+
+    # Build cluster lookup by id
+    cluster_lookup = {}
+    for c in clusters_db:
+        cluster_lookup[c["id"]] = c
+
+    # Build node→cluster mapping from DB
+    node_cluster_map = {}
+    for n in all_nodes:
+        node_cluster_map[n["name"]] = cluster_lookup.get(n.get("cluster_id"))
+
     # Ricarica i nodi esistenti
     new_nodes = {}
     for nc in nodes_db:
         name = nc["name"]
+        cluster_info = node_cluster_map.get(name)
         if name in cluster.nodes:
-            # Aggiorna i parametri del nodo esistente
             old_node = cluster.nodes[name]
             old_node.host = nc["host"]
             old_node.port = nc["port"]
             old_node.timeout = nc["timeout"]
             old_node.base_url = f"https://{nc['host']}:{nc['port']}/api2/json"
+            old_node.cluster = cluster_info
             new_nodes[name] = old_node
         else:
-            # Crea nuovo nodo
             new_nodes[name] = ProxmoxNode(
                 name=nc["name"],
                 host=nc["host"],
                 port=nc["port"],
-                timeout=nc["timeout"]
+                timeout=nc["timeout"],
+                cluster=cluster_info,
             )
-    
-    # Rimuovi nodi non più presenti
+
     for name in list(cluster.nodes.keys()):
         if name not in new_nodes:
             del cluster.nodes[name]
-    
+
     cluster.nodes = new_nodes
-    
-    # Reconnect
     cluster.connect_all()
-    
-    # Invalida cache
-    cluster.invalidate_cache()
+    cluster._refresh_node_data()
 
 
 def init_cluster_from_db():
     """Inizializza il cluster leggendo i nodi dal database."""
-    from database import get_proxmox_nodes, init_db
+    from database import get_proxmox_nodes, get_clusters, init_db
+    from config import settings
     init_db()
     nodes_db = get_proxmox_nodes(enabled_only=True)
-    
+    clusters_db = get_clusters()
+
+    # Set active cluster from settings
+    cluster._active_cluster = None
+    if settings.PROXMOX_CLUSTERS:
+        cluster._active_cluster = settings.PROXMOX_CLUSTERS[0]
+
+    # Build cluster lookup by id
+    cluster_lookup = {}
+    for c in clusters_db:
+        cluster_lookup[c["id"]] = c
+
     cluster.nodes = {}
     for nc in nodes_db:
+        cluster_info = cluster_lookup.get(nc.get("cluster_id"))
         cluster.nodes[nc["name"]] = ProxmoxNode(
             name=nc["name"],
             host=nc["host"],
             port=nc["port"],
-            timeout=nc["timeout"]
+            timeout=nc["timeout"],
+            cluster=cluster_info,
         )
-    
+
     if cluster.nodes:
         print(f"📡 Loaded {len(cluster.nodes)} nodes from database")
         cluster.connect_all()

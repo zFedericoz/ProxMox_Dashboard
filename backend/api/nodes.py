@@ -20,35 +20,20 @@ from proxmox_client import reload_nodes
 
 router = APIRouter(tags=["nodes"])
 
-def _fetch_cluster_node_names(host: str, port: int, timeout: int, cluster: dict = None) -> list[str]:
+def _fetch_cluster_node_names(host: str, port: int, timeout: int) -> list[str]:
     """
     Validate that the Proxmox API is reachable and credentials work.
     Returns the list of node names returned by /api2/json/nodes.
     If Proxmox is unreachable, returns empty list (validation skipped).
+    Always authenticates as root@pam via username/password.
     """
     base_url = f"https://{host}:{port}/api2/json"
     verify = bool(settings.PROXMOX_VERIFY_SSL)
 
-    token_name = (cluster.get("token_name") if cluster else None) or settings.PROXMOX_TOKEN_NAME
-    token_value = (cluster.get("token_value") if cluster else None) or settings.PROXMOX_TOKEN_VALUE
-
     try:
-        if token_name and token_value:
-            headers = {
-                "Authorization": (
-                    f"PVEAPIToken={settings.PROXMOX_USER}!"
-                    f"{token_name}={token_value}"
-                )
-            }
-            r = requests.get(f"{base_url}/nodes", headers=headers, timeout=timeout, verify=verify)
-            if r.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"Proxmox nodes list failed: HTTP {r.status_code}")
-            data = r.json().get("data") or []
-            return [n.get("node") for n in data if n.get("node")]
-
         r = requests.post(
             f"{base_url}/access/ticket",
-            data={"username": settings.PROXMOX_USER, "password": settings.PROXMOX_PASSWORD},
+            data={"username": "root@pam", "password": settings.PROXMOX_PASSWORD},
             timeout=timeout,
             verify=verify,
         )
@@ -95,7 +80,6 @@ async def create_node(request: Request):
     try:
         raw = await request.body()
     except ClientDisconnect:
-        # Nginx/browser closed the connection while uploading the request body.
         raise HTTPException(status_code=499, detail="Client disconnected while sending request body")
 
     try:
@@ -112,35 +96,23 @@ async def create_node(request: Request):
     timeout = body.get("timeout", 8)
     zone = body.get("zone", "Default")
 
-    # Validate node name against Proxmox API (prevents "offline" due to name mismatch).
+    # Verify Proxmox is reachable and credentials are valid.
+    # The node name provided by the user is used as-is (display name in dashboard).
     # If Proxmox is unreachable, skip validation and allow adding node anyway.
-    names = _fetch_cluster_node_names(host, int(port), int(timeout))
-    requested_name = name
-    if names and name not in names:
-        base = str(name).split(".")[0]
-        if base in names:
-            name = base
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": "Nome nodo non valido per Proxmox API",
-                    "provided": requested_name,
-                    "expected": names,
-                },
-            )
+    api_names = _fetch_cluster_node_names(host, int(port), int(timeout))
+    # api_names is only used to confirm connectivity; we don't enforce name matching
+    # since the user-provided name is a dashboard label, not necessarily the PVE node name.
 
     node = create_proxmox_node(name, host, port, timeout, zone)
     reload_nodes()
     log_activity("admin", f"Nodo creato: {name}", resource=f"node:{name}", severity="info")
-    return {"success": True, "node": node, "requested_name": requested_name, "api_node_name": name}
+    return {"success": True, "node": node}
 
 
 @router.put("/api/nodes/{node_name}")
 async def update_node(node_name: str, request: Request):
     """Update a Proxmox node."""
     body = await request.json()
-    # Accept 0/1/"0"/"1" from the UI and coerce to bool for Postgres.
     if "enabled" in body:
         v = body.get("enabled")
         if isinstance(v, str):
@@ -175,4 +147,3 @@ async def delete_node(node_name: str, request: Request):
     except Exception as e:
         print(f"Error deleting node: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-

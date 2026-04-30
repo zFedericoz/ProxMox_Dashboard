@@ -594,3 +594,146 @@ def cleanup_old_metrics(days: int = 30):
     except Exception:
         conn.close()
     return True
+
+# ── Cluster CRUD ──────────────────────────────────────────────────────────────
+
+def init_clusters_table():
+    """Add clusters table and cluster_id column to proxmox_nodes if not present."""
+    conn = get_db()
+    cursor = conn._cursor
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS clusters (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100) UNIQUE NOT NULL,
+            description TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Add cluster_id column to proxmox_nodes if it doesn't exist yet
+    cursor.execute("""
+        ALTER TABLE proxmox_nodes
+        ADD COLUMN IF NOT EXISTS cluster_id INTEGER REFERENCES clusters(id) ON DELETE SET NULL
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_proxmox_nodes_cluster_id ON proxmox_nodes(cluster_id)")
+    conn.commit()
+    conn.close()
+
+
+def get_clusters() -> List[Dict]:
+    conn = get_db()
+    try:
+        conn.execute("""
+            SELECT c.*,
+                   COUNT(n.id) AS node_count
+            FROM clusters c
+            LEFT JOIN proxmox_nodes n ON n.cluster_id = c.id
+            GROUP BY c.id
+            ORDER BY c.name
+        """)
+        rows = conn.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        conn.close()
+        return []
+
+
+def get_cluster_by_id(cluster_id: int) -> Optional[Dict]:
+    conn = get_db()
+    try:
+        conn.execute("SELECT * FROM clusters WHERE id = %s", (cluster_id,))
+        row = conn.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        conn.close()
+        return None
+
+
+def create_cluster(name: str, description: str = '') -> Optional[Dict]:
+    conn = get_db()
+    try:
+        conn.execute("""
+            INSERT INTO clusters (name, description)
+            VALUES (%s, %s)
+            RETURNING *
+        """, (name, description))
+        row = conn.fetchone()
+        conn.commit()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        conn.close()
+        return None
+
+
+def update_cluster(cluster_id: int, **kwargs) -> Optional[Dict]:
+    allowed = {'name', 'description'}
+    kwargs = {k: v for k, v in kwargs.items() if k in allowed}
+    if not kwargs:
+        return None
+    set_clause = ', '.join([f"{k} = %s" for k in kwargs.keys()])
+    values = list(kwargs.values()) + [cluster_id]
+    conn = get_db()
+    try:
+        conn.execute(
+            f"UPDATE clusters SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = %s RETURNING *",
+            values
+        )
+        row = conn.fetchone()
+        conn.commit()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        conn.close()
+        return None
+
+
+def delete_cluster(cluster_id: int) -> bool:
+    conn = get_db()
+    try:
+        # Unassign nodes first
+        conn.execute("UPDATE proxmox_nodes SET cluster_id = NULL WHERE cluster_id = %s", (cluster_id,))
+        conn.execute("DELETE FROM clusters WHERE id = %s", (cluster_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        conn.close()
+        return False
+
+
+def assign_node_to_cluster(node_name: str, cluster_id: Optional[int]) -> bool:
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE proxmox_nodes SET cluster_id = %s, updated_at = CURRENT_TIMESTAMP WHERE name = %s",
+            (cluster_id, node_name)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        conn.close()
+        return False
+
+
+def get_proxmox_nodes_with_cluster(enabled_only: bool = False) -> List[Dict]:
+    """Returns nodes joined with their cluster info."""
+    conn = get_db()
+    try:
+        where = "WHERE n.enabled = TRUE" if enabled_only else ""
+        conn.execute(f"""
+            SELECT n.*, c.name AS cluster_name
+            FROM proxmox_nodes n
+            LEFT JOIN clusters c ON c.id = n.cluster_id
+            {where}
+            ORDER BY c.name NULLS LAST, n.name
+        """)
+        rows = conn.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        conn.close()
+        return []
