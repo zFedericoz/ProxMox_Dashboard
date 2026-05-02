@@ -3,25 +3,36 @@ import { useAuth } from '../context/AuthContext'
 
 const MAX_RETRIES = 2
 const RETRY_DELAY = 500
+const FETCH_TIMEOUT = 25000
 
 const globalCache = new Map()
 const CACHE_TTL = 10000
 
 async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
   let lastError
-  
+
   for (let i = 0; i <= retries; i++) {
     try {
-      const response = await fetch(url, options)
-      
+      // Aggiungi timeout alla fetch
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
+
+      const fetchOptions = {
+        ...options,
+        signal: options.signal || controller.signal
+      }
+
+      const response = await fetch(url, fetchOptions)
+      clearTimeout(timeoutId)
+
       if (response.status === 304) {
         return { success: true, data: globalCache.get(url), cached: true }
       }
-      
+
       if (response.status === 401) {
         throw new Error('UNAUTHORIZED')
       }
-      
+
       if (!response.ok) {
         const data = await response.json().catch(() => ({}))
         const detail =
@@ -32,28 +43,28 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
               : null
         throw new Error(detail || `HTTP ${response.status}`)
       }
-      
+
       const data = await response.json()
-      
+
       if (options.method === 'GET' || !options.method) {
         globalCache.set(url, data)
         setTimeout(() => globalCache.delete(url), CACHE_TTL)
       }
-      
+
       return { success: true, data }
     } catch (error) {
       lastError = error
-      
+
       if (error.message === 'UNAUTHORIZED') {
         throw error
       }
-      
-      if (i < retries && error.message !== 'NetworkError') {
+
+      if (i < retries && error.name !== 'AbortError' && error.message !== 'NetworkError') {
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (i + 1)))
       }
     }
   }
-  
+
   return { success: false, error: lastError.message }
 }
 

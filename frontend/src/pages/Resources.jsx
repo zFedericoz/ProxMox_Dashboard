@@ -29,18 +29,22 @@ const fmt = {
 export function Resources() {
   const { data: clustersData } = useApi('/api/clusters', { refetchInterval: 30000 })
   const [selectedClusterId, setSelectedClusterId] = useState(null)
+  const [selectedStandalone, setSelectedStandalone] = useState(false)
   const clusters = clustersData?.clusters || []
+  const standaloneNodes = clustersData?.standalone_nodes || []
 
   // Auto-select first cluster when clusters load
   useEffect(() => {
-    if (clusters.length > 0 && selectedClusterId === null) {
+    if (clusters.length > 0 && selectedClusterId === null && !selectedStandalone) {
       setSelectedClusterId(clusters[0].id)
     }
   }, [clusters])
 
-  const apiEndpoint = selectedClusterId
-    ? `/api/cluster/all?cluster_id=${selectedClusterId}`
-    : '/api/cluster/all'
+  const apiEndpoint = selectedStandalone
+    ? '/api/cluster/all?standalone=true'
+    : selectedClusterId
+      ? `/api/cluster/all?cluster_id=${selectedClusterId}`
+      : '/api/cluster/all'
   const { data, loading, error, refetch } = useApi(apiEndpoint, { refetchInterval: 60000 })
   const { execute: apiExecute } = useApiAction()
   const toast = useToast()
@@ -59,6 +63,7 @@ export function Resources() {
   const [migrateTarget, setMigrateTarget] = useState('')
   const [migrateOnline, setMigrateOnline] = useState(true)
   const [migrating, setMigrating] = useState(false)
+  const [eligibleMigrationNodes, setEligibleMigrationNodes] = useState([])
 
   const vms = data?.vms || []
   const containers = data?.containers || []
@@ -177,7 +182,8 @@ export function Resources() {
       return
     }
     setMigrating(true)
-    const endpoint = activeTab === 'vms' 
+    const isVm = selectedVm.type === 'vm' || selectedVm.type === 'qemu'
+    const endpoint = isVm
       ? `/api/vms/${selectedVm.node}/${selectedVm.vmid}/migrate`
       : `/api/containers/${selectedVm.node}/${selectedVm.vmid}/migrate`
     
@@ -191,25 +197,65 @@ export function Resources() {
       toast.success(`Migrazione di ${selectedVm.name} verso ${migrateTarget} avviata`)
       setShowMigrateModal(false)
       setSelectedVm(null)
-      setTimeout(() => refetch(), 3000)
+      // Più refetch con ritardi crescenti per attendere aggiornamento backend
+      setTimeout(() => refetch(), 2000)
+      setTimeout(() => refetch(), 5000)
+      setTimeout(() => refetch(), 10000)
     } else {
       toast.error(result.error || 'Errore migrazione')
     }
   }
 
   const openMigrateModal = (vm, type) => {
-    setSelectedVm(vm)
+    setSelectedVm({...vm, type})
     setActiveTab(type)
-    const otherNodes = allNodes.filter(n => n !== vm.node)
-    setMigrateTarget(otherNodes[0] || '')
+    
+    // Filtra solo i nodi dello stesso cluster
+    // Se la VM è su un nodo standalone, non può essere migrata (nessun altro nodo nello stesso cluster)
+    // Se la VM è su un nodo in un cluster, mostra solo gli altri nodi dello stesso cluster
+    let eligibleNodes = []
+    
+    if (selectedStandalone) {
+      // VM/CT su nodo standalone - nessuna migrazione possibile
+      eligibleNodes = []
+    } else if (selectedClusterId) {
+      // Trova il cluster corrente
+      const currentCluster = clusters.find(c => c.id === selectedClusterId)
+      if (currentCluster) {
+        // Ottieni tutti i nodi del cluster eccetto quello corrente
+        const clusterNodeNames = (currentCluster.nodes || []).map(n => n.name)
+        eligibleNodes = clusterNodeNames.filter(n => n !== vm.node)
+      }
+    }
+    
+    if (eligibleNodes.length === 0) {
+      toast.error('Nessun nodo disponibile per la migrazione nello stesso cluster')
+      return
+    }
+    
+    setEligibleMigrationNodes(eligibleNodes)
+    setMigrateTarget(eligibleNodes[0] || '')
+    // Imposta migrazione online di default se la VM/CT è in running, altrimenti offline
+    setMigrateOnline(vm.status === 'running')
     setShowMigrateModal(true)
   }
 
   const QuickActions = ({ vm, type }) => {
     const isRunning = vm.status === 'running'
     const isStopped = vm.status === 'stopped' || vm.status === 'paused'
-    const otherNodes = allNodes.filter(n => n !== vm.node)
-    const canMigrate = otherNodes.length > 0
+    
+    // Determina nodi eligibili per la migrazione (stesso cluster, escluso nodo corrente)
+    let eligibleNodes = []
+    if (selectedStandalone) {
+      eligibleNodes = []
+    } else if (selectedClusterId) {
+      const currentCluster = clusters.find(c => c.id === selectedClusterId)
+      if (currentCluster) {
+        const clusterNodeNames = (currentCluster.nodes || []).map(n => n.name)
+        eligibleNodes = clusterNodeNames.filter(n => n !== vm.node)
+      }
+    }
+    const canMigrate = eligibleNodes.length > 0
     
     return (
       <div className="flex items-center gap-1">
@@ -249,7 +295,7 @@ export function Resources() {
           onClick={() => openMigrateModal(vm, type)}
           disabled={!canMigrate}
           className="p-1.5 rounded hover:bg-purple-900/50 text-purple-400 disabled:opacity-30 disabled:cursor-not-allowed"
-          title="Migra"
+          title={canMigrate ? "Migra" : "Migrazione non disponibile (nessun altro nodo nello stesso cluster)"}
         >
           <ArrowRight size={14} />
         </button>
@@ -259,15 +305,15 @@ export function Resources() {
 
   return (
     <div className="space-y-6">
-      {/* Cluster tabs */}
+      {/* Cluster + Standalone tabs */}
       {clusters.length > 0 && (
         <div className="flex gap-1 border-b border-gray-800 overflow-x-auto">
           {clusters.map(c => (
             <button
               key={c.id}
-              onClick={() => setSelectedClusterId(c.id)}
+              onClick={() => { setSelectedClusterId(c.id); setSelectedStandalone(false); }}
               className={`flex items-center gap-2 px-5 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
-                c.id === selectedClusterId
+                c.id === selectedClusterId && !selectedStandalone
                   ? 'border-cyan-400 text-white bg-gray-800/40'
                   : 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-800/20'
               }`}
@@ -276,6 +322,19 @@ export function Resources() {
               {c.name}
             </button>
           ))}
+          {standaloneNodes.length > 0 && (
+            <button
+              onClick={() => { setSelectedStandalone(true); setSelectedClusterId(null); }}
+              className={`flex items-center gap-2 px-5 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+                selectedStandalone
+                  ? 'border-cyan-400 text-white bg-gray-800/40'
+                  : 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-800/20'
+              }`}
+            >
+              <Server size={14} />
+              Standalone ({standaloneNodes.length})
+            </button>
+          )}
         </div>
       )}
 
@@ -454,43 +513,93 @@ export function Resources() {
               <span className="text-gray-400">Stato:</span>
               <StatusBadge status={selectedVm?.status} />
             </div>
+            {selectedClusterId && (
+              <div className="flex items-center justify-between mt-2">
+                <span className="text-gray-400">Cluster:</span>
+                <span className="text-purple-400 font-mono">
+                  {clusters.find(c => c.id === selectedClusterId)?.name || 'N/A'}
+                </span>
+              </div>
+            )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-400 mb-1">Nodo Target</label>
+            <label className="block text-sm font-medium text-gray-400 mb-1">
+              Nodo Target (stesso cluster)
+            </label>
             <select
               value={migrateTarget}
               onChange={(e) => setMigrateTarget(e.target.value)}
               className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-200 focus:outline-none focus:border-cyan-500"
             >
-              {allNodes.filter(n => n !== selectedVm?.node).map(node => (
+              {eligibleMigrationNodes.map(node => (
                 <option key={node} value={node}>{node}</option>
               ))}
             </select>
+            {eligibleMigrationNodes.length === 1 && (
+              <p className="text-xs text-gray-500 mt-1">
+                Unico nodo disponibile nello stesso cluster
+              </p>
+            )}
           </div>
 
-          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={migrateOnline}
-              onChange={(e) => setMigrateOnline(e.target.checked)}
-              className="rounded border-gray-600 bg-gray-800 text-cyan-500"
-            />
-            Migrazione online (senza spegnere la VM)
-          </label>
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-400">Tipo di migrazione</label>
+            
+            <label className="flex items-start gap-2 text-sm text-gray-400 cursor-pointer p-3 bg-gray-800/50 rounded border border-gray-700 hover:border-cyan-500/50 transition-colors">
+              <input
+                type="radio"
+                checked={migrateOnline}
+                onChange={() => setMigrateOnline(true)}
+                disabled={selectedVm?.status !== 'running'}
+                className="mt-0.5 border-gray-600 bg-gray-800 text-cyan-500 disabled:opacity-50"
+              />
+              <div className="flex-1">
+                <div className="font-medium text-gray-200">Migrazione a caldo (online)</div>
+                <div className="text-xs text-gray-500">
+                  La {activeTab === 'vms' ? 'VM' : 'container'} rimane accesa durante la migrazione. 
+                  {selectedVm?.status !== 'running' && ' (Richiede che la risorsa sia in esecuzione)'}
+                </div>
+              </div>
+            </label>
 
-          {!migrateOnline && selectedVm?.status === 'running' && (
-            <p className="text-xs text-yellow-400">
-              La VM verra spenta prima della migrazione e riaccesa al termine.
-            </p>
+            <label className="flex items-start gap-2 text-sm text-gray-400 cursor-pointer p-3 bg-gray-800/50 rounded border border-gray-700 hover:border-cyan-500/50 transition-colors">
+              <input
+                type="radio"
+                checked={!migrateOnline}
+                onChange={() => setMigrateOnline(false)}
+                className="mt-0.5 border-gray-600 bg-gray-800 text-cyan-500"
+              />
+              <div className="flex-1">
+                <div className="font-medium text-gray-200">Migrazione a freddo (offline)</div>
+                <div className="text-xs text-gray-500">
+                  La {activeTab === 'vms' ? 'VM' : 'container'} viene spenta, migrata e poi riavviata.
+                  {selectedVm?.status === 'running' && ' (Comporta downtime)'}
+                </div>
+              </div>
+            </label>
+          </div>
+
+          {migrateOnline && selectedVm?.status !== 'running' && (
+            <div className="bg-yellow-900/20 border border-yellow-800/50 rounded-lg p-3">
+              <p className="text-sm text-yellow-400">
+                ⚠ Migrazione online non disponibile: la {activeTab === 'vms' ? 'VM' : 'container'} non è in esecuzione.
+                Seleziona migrazione offline.
+              </p>
+            </div>
           )}
 
           <div className="flex justify-end gap-3 pt-4 border-t border-gray-700">
             <Button variant="ghost" onClick={() => setShowMigrateModal(false)}>
               Annulla
             </Button>
-            <Button onClick={handleMigrate} loading={migrating} icon={<ArrowRight size={16} />}>
-              Avvia Migrazione
+            <Button 
+              onClick={handleMigrate} 
+              loading={migrating} 
+              icon={<ArrowRight size={16} />}
+              disabled={migrateOnline && selectedVm?.status !== 'running'}
+            >
+              Avvia Migrazione {migrateOnline ? '(Online)' : '(Offline)'}
             </Button>
           </div>
         </div>

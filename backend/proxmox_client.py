@@ -698,8 +698,10 @@ class ProxmoxCluster:
                 all_snapshots[name] = []
         return all_snapshots
 
-    def get_cluster_health(self) -> Dict:
-        """Get cluster health status including HA, quorum, and issues."""
+    def get_cluster_health(self, node_filter: set = None) -> Dict:
+        """Get cluster health status including HA, quorum, and issues.
+        Se node_filter è fornito, considera solo i nodi in quel set.
+        Il quorum è calcolato in base ai nodi effettivamente online dalla cache o dallo stato di connessione."""
         health = {
             "status": "healthy",
             "quorum": False,
@@ -708,56 +710,77 @@ class ProxmoxCluster:
             "issues": [],
             "warnings": []
         }
-        
-        try:
-            first_node = next((n for n in self.nodes.values() if n.connected), None)
-            if not first_node:
-                health["status"] = "no_nodes"
-                health["issues"].append({"severity": "critical", "message": "Nessun nodo connesso"})
-                return health
-            
-            cluster_status = first_node.get_cluster_status()
-            
-            if "quorate" in cluster_status:
-                health["quorum"] = cluster_status.get("quorate", False)
-            
-            if "nodes" in cluster_status:
-                for node in cluster_status.get("nodes", []):
-                    node_info = {
-                        "name": node.get("node", "unknown"),
-                        "online": node.get("online", 0) == 1,
-                        "ip": node.get("ip", ""),
-                        "level": node.get("level", ""),
-                        "local": node.get("local", 0) == 1
-                    }
-                    health["nodes"].append(node_info)
-            
-            if not health["quorum"]:
+
+        active_nodes = self.nodes
+        if node_filter:
+            active_nodes = {n: node for n, node in self.nodes.items() if n in node_filter}
+
+        if not active_nodes:
+            health["status"] = "no_nodes"
+            health["issues"].append({"severity": "critical", "message": "Nessun nodo nel cluster"})
+            return health
+
+        online_count = 0
+        total_count = len(active_nodes)
+
+        print(f"[health] node_filter={node_filter}")
+        print(f"[health] all nodes: {list(self.nodes.keys())}")
+        print(f"[health] active_nodes: {list(active_nodes.keys())}")
+        print(f"[health] cache keys: {list(_node_data_cache.keys())}")
+
+        for name, node_obj in active_nodes.items():
+            d = _node_data_cache.get(name, {})
+            cache_status = d.get("status")
+            connected = node_obj.connected
+
+            # Se il nodo è connesso e la cache non lo segna come offline, è online
+            if connected and cache_status != "offline":
+                is_online = True
+            elif not d:
+                # Nodo non ancora nella cache: usa lo stato di connessione
+                is_online = connected
+            else:
+                is_online = cache_status == "online"
+
+            print(f"[health] node={name} connected={connected} cache_status={cache_status} is_online={is_online}")
+
+            node_info = {
+                "name": name,
+                "online": is_online,
+                "ip": d.get("host", node_obj.host),
+                "level": "",
+                "local": False
+            }
+            health["nodes"].append(node_info)
+            if is_online:
+                online_count += 1
+
+        # Quorum richiede MAGGIORANZA STRETTA: più della metà dei nodi devono essere online
+        # Con 3 nodi serve 2+, con 5 serve 3+, con 2 serve 2 (entrambi), con 1 serve 1
+        has_quorum = online_count > (total_count / 2.0)
+        print(f"[health] online_count={online_count} total={total_count} quorum={has_quorum}")
+        health["quorum"] = has_quorum
+
+        # Raccogli issues solo per nodi OFFLINE nel cluster filtrato
+        for node in health["nodes"]:
+            if not node["online"]:
                 health["issues"].append({
                     "severity": "critical",
-                    "type": "quorum",
-                    "message": "Quorum del cluster perso - decisioni cluster bloccate",
-                    "suggestion": "Verificare connettività di rete tra nodi"
+                    "type": "node_offline",
+                    "message": f"Nodo {node['name']} offline",
+                    "node": node["name"]
                 })
-            
-            for node in health["nodes"]:
-                if not node["online"]:
-                    health["issues"].append({
-                        "severity": "critical",
-                        "type": "node_offline",
-                        "message": f"Nodo {node['name']} offline",
-                        "node": node["name"]
-                    })
-            
-            try:
-                ha_status = first_node.get_cluster_ha_status()
+
+        try:
+            first_online = next((n for n in active_nodes.values() if n.connected), None)
+            if first_online:
+                ha_status = first_online.get_cluster_ha_status()
                 if ha_status:
                     health["ha_status"] = {
                         "enabled": True,
                         "status": ha_status.get("status", "unknown"),
                         "resources": ha_status.get("resources", [])
                     }
-                    
                     for res in ha_status.get("resources", []):
                         state = res.get("state", "")
                         if state != "running":
@@ -767,49 +790,53 @@ class ProxmoxCluster:
                                 "message": f"HA resource {res.get('sid', 'unknown')} in stato: {state}",
                                 "resource": res.get("sid", "")
                             })
-            except Exception:
-                pass
-            
-            for name, d in _node_data_cache.items():
-                if d.get("status") == "online":
-                    if d.get("disk_percent", 0) > 90:
-                        health["issues"].append({
-                            "severity": "critical",
-                            "type": "disk_full",
-                            "message": f"Disco nodo {name} al {d['disk_percent']}%",
-                            "node": name
-                        })
-                    elif d.get("disk_percent", 0) > 80:
-                        health["warnings"].append({
-                            "severity": "warning",
-                            "type": "disk_space",
-                            "message": f"Disco nodo {name} al {d['disk_percent']}%",
-                            "node": name
-                        })
-                    
-                    if d.get("mem_percent", 0) > 95:
-                        health["warnings"].append({
-                            "severity": "warning",
-                            "type": "memory",
-                            "message": f"RAM nodo {name} al {d['mem_percent']}%",
-                            "node": name
-                        })
-            
-            if health["issues"]:
-                health["status"] = "critical"
-            elif health["warnings"]:
-                health["status"] = "warning"
-                
-        except Exception as e:
-            health["status"] = "error"
-            health["issues"].append({"severity": "critical", "message": f"Errore lettura cluster: {e}"})
-        
+        except Exception:
+            pass
+
+        # Check disk/memory solo per nodi nel cluster filtrato
+        for name, d in _node_data_cache.items():
+            if node_filter and name not in node_filter:
+                continue
+            if d.get("status") == "online":
+                if d.get("disk_percent", 0) > 90:
+                    health["issues"].append({
+                        "severity": "critical",
+                        "type": "disk_full",
+                        "message": f"Disco nodo {name} al {d['disk_percent']}%",
+                        "node": name
+                    })
+                elif d.get("disk_percent", 0) > 80:
+                    health["warnings"].append({
+                        "severity": "warning",
+                        "type": "disk_space",
+                        "message": f"Disco nodo {name} al {d['disk_percent']}%",
+                        "node": name
+                    })
+
+                if d.get("mem_percent", 0) > 95:
+                    health["warnings"].append({
+                        "severity": "warning",
+                        "type": "memory",
+                        "message": f"RAM nodo {name} al {d['mem_percent']}%",
+                        "node": name
+                    })
+
+        # FIX: Determina lo stato solo basandoti su issues/warnings effettivamente nel cluster filtrato
+        # Se tutti i nodi nel cluster sono online e non ci sono problemi di risorse, lo stato è healthy
+        if health["issues"]:
+            health["status"] = "critical"
+        elif health["warnings"]:
+            health["status"] = "warning"
+        else:
+            health["status"] = "healthy"
+
         return health
 
-    def get_drs_recommendations(self) -> Dict:
+    def get_drs_recommendations(self, node_filter: set = None) -> Dict:
         """
         DRS - Distributed Resource Scheduler
         Calcola raccomandazioni per bilanciamento carico cluster.
+        Se node_filter è fornito, considera solo i nodi in quel set.
         """
         recommendations = {
             "enabled": False,
@@ -817,14 +844,20 @@ class ProxmoxCluster:
             "nodes": [],
             "metrics": {}
         }
-        
-        if len(self.nodes) < 2:
+
+        eligible_nodes = self.nodes
+        if node_filter:
+            eligible_nodes = {n: node for n, node in self.nodes.items() if n in node_filter}
+
+        if len(eligible_nodes) < 2:
             recommendations["message"] = "DRS richiede almeno 2 nodi"
             return recommendations
-        
+
         recommendations["enabled"] = True
-        
+
         for name, d in _node_data_cache.items():
+            if node_filter and name not in node_filter:
+                continue
             if d.get("status") != "online":
                 continue
                 

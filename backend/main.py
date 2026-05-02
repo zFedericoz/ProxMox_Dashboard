@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Depends, Query
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -211,6 +211,13 @@ def _invalidate_all_cache():
 
 @app.middleware("http")
 async def api_cache_middleware(request: Request, call_next):
+    # Non cacheare /api/cluster/all per evitare dati stale dopo migrazioni
+    if request.url.path == "/api/cluster/all":
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        return response
+    
     if request.method != "GET" or not request.url.path.startswith("/api/"):
         # Non-GET: esegui la mutation e poi invalida la cache
         response = await call_next(request)
@@ -483,17 +490,27 @@ async def get_nodes():
     return {"nodes": summary["nodes"]}
 
 @app.get("/api/cluster/health")
-async def get_cluster_health():
+async def get_cluster_health(cluster_id: Optional[int] = Query(None)):
     """Get cluster health status including HA, quorum, and issues."""
-    return cluster.get_cluster_health()
+    node_filter = None
+    if cluster_id is not None:
+        from database import get_proxmox_nodes_with_cluster
+        all_nodes = get_proxmox_nodes_with_cluster()
+        node_filter = {n["name"] for n in all_nodes if n.get("cluster_id") == cluster_id}
+    return cluster.get_cluster_health(node_filter=node_filter)
 
 @app.get("/api/cluster/drs")
-async def get_drs_recommendations():
+async def get_drs_recommendations(cluster_id: Optional[int] = Query(None)):
     """Get DRS (Distributed Resource Scheduler) recommendations."""
-    return cluster.get_drs_recommendations()
+    node_filter = None
+    if cluster_id is not None:
+        from database import get_proxmox_nodes_with_cluster
+        all_nodes = get_proxmox_nodes_with_cluster()
+        node_filter = {n["name"] for n in all_nodes if n.get("cluster_id") == cluster_id}
+    return cluster.get_drs_recommendations(node_filter=node_filter)
 
 @app.get("/api/cluster/placement")
-async def get_vm_placement_suggestion(cluster_id: Optional[int] = None):
+async def get_vm_placement_suggestion(cluster_id: Optional[int] = Query(None)):
     """Get suggested best node for VM placement. Se cluster_id è fornito, filtra ai soli nodi di quel cluster."""
     node_filter = None
     if cluster_id is not None:
@@ -524,17 +541,24 @@ async def get_resources():
             "total_vms": len(vms), "total_containers": len(cts)}
 
 @app.get("/api/cluster/all")
-async def get_cluster_all(cluster_id: Optional[int] = None):
+async def get_cluster_all(cluster_id: Optional[int] = Query(None), standalone: Optional[bool] = Query(None)):
     """
     Endpoint aggregato: summary + vms + containers in una sola chiamata.
     La cache è condivisa — zero refresh duplicati.
     Se cluster_id è fornito, filtra vms/containers ai soli nodi di quel cluster.
+    Se standalone=true, filtra ai soli nodi senza cluster.
     """
     summary = cluster.get_cluster_summary()   # aggiorna cache se stale
     vms     = cluster.get_all_vms()           # legge dalla stessa cache
     cts     = cluster.get_all_containers()    # idem
 
-    if cluster_id is not None:
+    if standalone:
+        from database import get_proxmox_nodes_with_cluster
+        all_nodes = get_proxmox_nodes_with_cluster()
+        standalone_node_names = {n["name"] for n in all_nodes if not n.get("cluster_id")}
+        vms = [v for v in vms if v.get("node") in standalone_node_names]
+        cts = [c for c in cts if c.get("node") in standalone_node_names]
+    elif cluster_id is not None:
         from database import get_proxmox_nodes
         nodes_in_cluster = get_proxmox_nodes(enabled_only=True)
         # We need cluster_id mapping — query with cluster info
@@ -549,6 +573,160 @@ async def get_cluster_all(cluster_id: Optional[int] = None):
 # ─── Routes: VM / Container Power Actions ─────────────────────────────────────
 VALID_VM_ACTIONS  = {"start", "stop", "shutdown", "reboot", "reset", "suspend", "resume"}
 VALID_CT_ACTIONS  = {"start", "stop", "shutdown", "reboot", "suspend", "resume"}
+
+@app.post("/api/vms/{node}/{vmid}/migrate")
+async def migrate_vm(node: str, vmid: int, request: Request):
+    """Migra una VM a un altro nodo dello stesso cluster."""
+    body = await request.json()
+    target_node = body.get("target_node")
+    if not target_node:
+        raise HTTPException(status_code=400, detail="target_node è obbligatorio")
+    
+    if target_node not in cluster.nodes:
+        raise HTTPException(status_code=404, detail=f"Nodo target '{target_node}' non trovato")
+    
+    pnode = cluster.nodes.get(node)
+    if not pnode:
+        raise HTTPException(status_code=404, detail=f"Nodo sorgente '{node}' non trovato")
+    
+    # VALIDAZIONE CLUSTER: i nodi devono essere nello stesso cluster
+    source_cluster = pnode.cluster
+    target_cluster = cluster.nodes[target_node].cluster
+    
+    # Estrai cluster_id da entrambi
+    source_cluster_id = source_cluster.get("id") if source_cluster else None
+    target_cluster_id = target_cluster.get("id") if target_cluster else None
+    
+    if source_cluster_id != target_cluster_id:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Impossibile migrare: i nodi devono essere nello stesso cluster. "
+                   f"Sorgente: {source_cluster.get('name', 'Standalone') if source_cluster else 'Standalone'}, "
+                   f"Target: {target_cluster.get('name', 'Standalone') if target_cluster else 'Standalone'}"
+        )
+    
+    if not pnode.connected:
+        pnode.authenticate()
+    if not pnode.connected:
+        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
+    
+    # Ottieni stato VM
+    vm_info = pnode.vm_status(vmid)
+    is_running = vm_info and vm_info.get("status") == "running"
+    target = cluster.nodes.get(target_node)
+    
+    if not target.connected:
+        target.authenticate()
+    if not target.connected:
+        raise HTTPException(status_code=503, detail=f"Nodo target '{target_node}' non raggiungibile")
+    
+    # Determina tipo migrazione
+    requested_online = body.get("online", True)
+    migrate_online = requested_online and is_running
+    
+    # Se richiesta migrazione online ma VM è spenta, errore
+    if requested_online and not is_running:
+        raise HTTPException(
+            status_code=400, 
+            detail="Impossibile migrazione online: la VM non è in esecuzione. Usa migrazione offline."
+        )
+    
+    result = pnode.migrate_vm(vmid, target_node, online=migrate_online)
+    
+    if result is None:
+        raise HTTPException(status_code=500, detail=pnode.last_error or "Errore migrazione")
+    
+    cluster.invalidate_cache()
+    ip = request.client.host if request.client else None
+    migration_type = "online" if migrate_online else "offline"
+    log_activity("admin", f"VM {vmid} migrata {migration_type} da {node} a {target_node}", 
+                 resource=f"qemu:{vmid}", node=node, ip_address=ip, severity="warning")
+    return {
+        "success": True, 
+        "task": result, 
+        "source": node, 
+        "target": target_node, 
+        "vmid": vmid,
+        "migration_type": migration_type
+    }
+
+@app.post("/api/containers/{node}/{vmid}/migrate")
+async def migrate_container(node: str, vmid: int, request: Request):
+    """Migra un container LXC a un altro nodo dello stesso cluster."""
+    body = await request.json()
+    target_node = body.get("target_node")
+    if not target_node:
+        raise HTTPException(status_code=400, detail="target_node è obbligatorio")
+    
+    if target_node not in cluster.nodes:
+        raise HTTPException(status_code=404, detail=f"Nodo target '{target_node}' non trovato")
+    
+    pnode = cluster.nodes.get(node)
+    if not pnode:
+        raise HTTPException(status_code=404, detail=f"Nodo sorgente '{node}' non trovato")
+    
+    # VALIDAZIONE CLUSTER: i nodi devono essere nello stesso cluster
+    source_cluster = pnode.cluster
+    target_cluster = cluster.nodes[target_node].cluster
+    
+    # Estrai cluster_id da entrambi
+    source_cluster_id = source_cluster.get("id") if source_cluster else None
+    target_cluster_id = target_cluster.get("id") if target_cluster else None
+    
+    if source_cluster_id != target_cluster_id:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Impossibile migrare: i nodi devono essere nello stesso cluster. "
+                   f"Sorgente: {source_cluster.get('name', 'Standalone') if source_cluster else 'Standalone'}, "
+                   f"Target: {target_cluster.get('name', 'Standalone') if target_cluster else 'Standalone'}"
+        )
+    
+    if not pnode.connected:
+        pnode.authenticate()
+    if not pnode.connected:
+        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
+    
+    target = cluster.nodes.get(target_node)
+    if not target.connected:
+        target.authenticate()
+    if not target.connected:
+        raise HTTPException(status_code=503, detail=f"Nodo target '{target_node}' non raggiungibile")
+    
+    # Ottieni stato container
+    ct_info = pnode.ct_status(vmid)
+    is_running = ct_info and ct_info.get("status") == "running"
+    
+    # Determina tipo migrazione
+    requested_online = body.get("online", True)
+    migrate_online = requested_online and is_running
+    
+    # Se richiesta migrazione online ma CT è spento, errore
+    if requested_online and not is_running:
+        raise HTTPException(
+            status_code=400, 
+            detail="Impossibile migrazione online: il container non è in esecuzione. Usa migrazione offline."
+        )
+    
+    result = pnode.migrate_ct(vmid, target_node, online=migrate_online)
+    
+    if result is None:
+        error_msg = pnode.last_error or "Errore migrazione"
+        print(f"[MIGRATE CT ERROR] VMID={vmid} node={node} target={target_node}: {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
+    
+    cluster.invalidate_cache()
+    ip = request.client.host if request.client else None
+    migration_type = "online" if migrate_online else "offline"
+    log_activity("admin", f"CT {vmid} migrato {migration_type} da {node} a {target_node}", 
+                 resource=f"lxc:{vmid}", node=node, ip_address=ip, severity="warning")
+    return {
+        "success": True, 
+        "task": result, 
+        "source": node, 
+        "target": target_node, 
+        "vmid": vmid,
+        "migration_type": migration_type
+    }
 
 @app.post("/api/vms/{node}/{vmid}/{action}")
 async def vm_power_action(node: str, vmid: int, action: str, request: Request):
@@ -575,7 +753,6 @@ async def vm_power_action(node: str, vmid: int, action: str, request: Request):
                 raise HTTPException(status_code=500, detail=f"Quorum fix fallito: {msg}")
         else:
             raise HTTPException(status_code=500, detail=err_msg)
-    # Invalida cache: il prossimo refresh leggerà lo stato aggiornato
     cluster.invalidate_cache()
     ip = request.client.host if request.client else None
     log_activity("admin", f"VM {vmid} on {node}: {action}", ip_address=ip,
@@ -612,84 +789,6 @@ async def ct_power_action(node: str, vmid: int, action: str, request: Request):
     log_activity("admin", f"CT {vmid} on {node}: {action}", ip_address=ip,
                  severity="warning" if action in ("stop","shutdown") else "info")
     return {"success": True, "task": result, "node": node, "vmid": vmid, "action": action}
-
-@app.post("/api/vms/{node}/{vmid}/migrate")
-async def migrate_vm(node: str, vmid: int, request: Request):
-    """Migra una VM a un altro nodo."""
-    body = await request.json()
-    target_node = body.get("target_node")
-    if not target_node:
-        raise HTTPException(status_code=400, detail="target_node è obbligatorio")
-    
-    if target_node not in cluster.nodes:
-        raise HTTPException(status_code=404, detail=f"Nodo target '{target_node}' non trovato")
-    
-    pnode = cluster.nodes.get(node)
-    if not pnode:
-        raise HTTPException(status_code=404, detail=f"Nodo sorgente '{node}' non trovato")
-    
-    if not pnode.connected:
-        pnode.authenticate()
-    if not pnode.connected:
-        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
-    
-    online = pnode.vm_status(vmid)
-    is_running = online and online.get("status") == "running"
-    target = cluster.nodes.get(target_node)
-    
-    if not target.connected:
-        target.authenticate()
-    if not target.connected:
-        raise HTTPException(status_code=503, detail=f"Nodo target '{target_node}' non raggiungibile")
-    
-    migrate_online = body.get("online", True) and is_running
-    result = pnode.migrate_vm(vmid, target_node, online=migrate_online)
-    
-    if result is None:
-        raise HTTPException(status_code=500, detail=pnode.last_error or "Errore migrazione")
-    
-    cluster.invalidate_cache()
-    ip = request.client.host if request.client else None
-    log_activity("admin", f"VM {vmid} migrata da {node} a {target_node}", 
-                 resource=f"qemu:{vmid}", node=node, ip_address=ip, severity="warning")
-    return {"success": True, "task": result, "source": node, "target": target_node, "vmid": vmid}
-
-@app.post("/api/containers/{node}/{vmid}/migrate")
-async def migrate_container(node: str, vmid: int, request: Request):
-    """Migra un container LXC a un altro nodo."""
-    body = await request.json()
-    target_node = body.get("target_node")
-    if not target_node:
-        raise HTTPException(status_code=400, detail="target_node è obbligatorio")
-    
-    if target_node not in cluster.nodes:
-        raise HTTPException(status_code=404, detail=f"Nodo target '{target_node}' non trovato")
-    
-    pnode = cluster.nodes.get(node)
-    if not pnode:
-        raise HTTPException(status_code=404, detail=f"Nodo sorgente '{node}' non trovato")
-    
-    if not pnode.connected:
-        pnode.authenticate()
-    if not pnode.connected:
-        raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
-    
-    target = cluster.nodes.get(target_node)
-    if not target.connected:
-        target.authenticate()
-    if not target.connected:
-        raise HTTPException(status_code=503, detail=f"Nodo target '{target_node}' non raggiungibile")
-    
-    result = pnode.migrate_ct(vmid, target_node, online=body.get("online", True))
-    
-    if result is None:
-        raise HTTPException(status_code=500, detail=pnode.last_error or "Errore migrazione")
-    
-    cluster.invalidate_cache()
-    ip = request.client.host if request.client else None
-    log_activity("admin", f"CT {vmid} migrato da {node} a {target_node}", 
-                 resource=f"lxc:{vmid}", node=node, ip_address=ip, severity="warning")
-    return {"success": True, "task": result, "source": node, "target": target_node, "vmid": vmid}
 
 # ─── Routes: Metrics History ──────────────────────────────────────────────────
 @app.get("/api/metrics/history")

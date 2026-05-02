@@ -29,27 +29,27 @@ const HealthIndicator = ({ status }) => {
 }
 
 export function ClusterHealth() {
-  const { data: healthData, loading, refetch } = useApi('/api/cluster/health', { refetchInterval: 30000 })
-  const { data: drsData } = useApi('/api/cluster/drs', { refetchInterval: 60000 })
+  const [activeCluster, setActiveCluster] = useState(null)
   const { data: clustersData } = useApi('/api/clusters', { refetchInterval: 30000 })
   const { data: summary } = useApi('/api/cluster/summary', { refetchInterval: 20000 })
 
-  const [activeCluster, setActiveCluster] = useState(null)
-
-  const health = healthData || {}
-  const drs = drsData || {}
   const clusters = clustersData?.clusters || []
   const allLiveNodes = summary?.nodes || []
 
-  // After first clusters load, default to first cluster
   const selectedId = activeCluster ?? (clusters[0]?.id ?? null)
   const selectedCluster = clusters.find(c => c.id === selectedId) || clusters[0]
 
-  // Placement endpoint with cluster filter
-  const placementEndpoint = selectedId
-    ? `/api/cluster/placement?cluster_id=${selectedId}`
-    : '/api/cluster/placement'
+  // Endpoints with cluster filter
+  const healthEndpoint = selectedId ? `/api/cluster/health?cluster_id=${selectedId}` : '/api/cluster/health'
+  const drsEndpoint = selectedId ? `/api/cluster/drs?cluster_id=${selectedId}` : '/api/cluster/drs'
+  const placementEndpoint = selectedId ? `/api/cluster/placement?cluster_id=${selectedId}` : '/api/cluster/placement'
+
+  const { data: healthData, loading, refetch } = useApi(healthEndpoint, { refetchInterval: 30000 })
+  const { data: drsData } = useApi(drsEndpoint, { refetchInterval: 60000 })
   const { data: placementData } = useApi(placementEndpoint, { refetchInterval: 60000 })
+
+  const health = healthData || {}
+  const drs = drsData || {}
   const placement = placementData || {}
 
   // Get live metrics for nodes in selected cluster

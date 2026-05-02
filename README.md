@@ -13,6 +13,8 @@ Dashboard di monitoraggio per cluster Proxmox con 3 nodi.
 
 Tutte le credenziali sono centralizzate in AWS Secrets Manager (secret: `syam-projectwork-pontos`).
 
+mettere lem proprie chiavi aws nel .env.example e rinominarlo in .env
+
 Il secret deve contenere:
 
 ### Database PostgreSQL (RDS)

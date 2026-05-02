@@ -26,38 +26,45 @@ export function Nodes() {
   const clusters = clustersData?.clusters || []
   const standaloneNodes = clustersData?.standalone_nodes || []
 
-  // Build a map from node name → cluster name for display
-  const nodeClusterMap = {}
-  clusters.forEach(c => {
-    (c.nodes || []).forEach(n => { nodeClusterMap[n.name] = c.name })
-  })
-
-  // Enrich allNodes with cluster info from live summary data
   const enriched = (nodes) =>
     nodes.map(n => ({ ...n, ...(allNodes.find(s => s.name === n.name) || {}) }))
 
+  const calcStats = (nodes) => {
+    const enrichedNodes = enriched(nodes)
+    const online = enrichedNodes.filter(n => n.status === 'online')
+    const cpuCores = online.reduce((s, n) => s + (n.cpu_cores || 0), 0)
+    const memGb = online.reduce((s, n) => s + (n.mem_total_gb || 0), 0)
+    const diskTb = online.reduce((s, n) => s + (n.disk_total_gb || 0), 0) / 1024
+    const avgCpu = online.length ? (online.reduce((s, n) => s + (n.cpu_usage || 0), 0) / online.length) : 0
+    const avgMem = online.length ? (online.reduce((s, n) => s + (n.mem_percent || 0), 0) / online.length) : 0
+    const avgDisk = online.length ? (online.reduce((s, n) => s + (n.disk_percent || 0), 0) / online.length) : 0
+    return { total: enrichedNodes.length, online: online.length, cpuCores, memGb, diskTb, avgCpu, avgMem, avgDisk }
+  }
+
   return (
     <div className="space-y-6">
-      {/* Top stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <CardStat label="CPU Totali" value={`${summary?.total_cpu_cores || 0} core`} icon={<Cpu size={18} />} color="cyan" />
-        <CardStat label="RAM Totale" value={`${(summary?.total_mem_gb || 0).toFixed(1)} GB`} icon={<MemoryStick size={18} />} color="purple" />
-        <CardStat label="Storage Totale" value={`${(summary?.total_disk_tb || 0).toFixed(2)} TB`} icon={<HardDrive size={18} />} color="green" />
-        <CardStat label="Nodi Online" value={`${summary?.online_nodes || 0}/${allNodes.length}`} icon={<Server size={18} />} color={summary?.online_nodes === allNodes.length ? 'green' : 'yellow'} />
-      </div>
-
       {/* Per-cluster sections */}
       {clusters.map(c => {
         const liveNodes = enriched(c.nodes || [])
         const onlineCount = liveNodes.filter(n => n.status === 'online').length
+        const stats = calcStats(c.nodes || [])
+
         return (
-          <div key={c.id} className="space-y-3">
+          <div key={c.id} className="space-y-4">
             <div className="flex items-center gap-2 px-1">
               <Layers size={16} className="text-cyan-400" />
               <h2 className="text-base font-semibold text-white">{c.name}</h2>
               {c.description && <span className="text-xs text-gray-500">{c.description}</span>}
-              <span className="ml-auto text-xs text-gray-500">{onlineCount}/{liveNodes.length} online</span>
             </div>
+
+            {/* Cluster stats */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 ml-1">
+              <CardStat label="CPU" value={`${stats.cpuCores} core`} icon={<Cpu size={18} />} color="cyan" />
+              <CardStat label="RAM" value={`${stats.memGb.toFixed(1)} GB`} icon={<MemoryStick size={18} />} color="purple" />
+              <CardStat label="Storage" value={`${stats.diskTb.toFixed(2)} TB`} icon={<HardDrive size={18} />} color="green" />
+              <CardStat label="Nodi Online" value={`${stats.online}/${stats.total}`} icon={<Server size={18} />} color={stats.online === stats.total && stats.total > 0 ? 'green' : 'yellow'} />
+            </div>
+
             {liveNodes.length === 0 ? (
               <div className="text-sm text-gray-500 px-2">Nessun nodo in questo cluster</div>
             ) : (
