@@ -10,7 +10,7 @@ import { ConfirmModal } from '../components/ui/Modal'
 import { formatDate } from '../utils/dateUtils'
 import { 
   User, Shield, Key, LogOut, Trash2, Edit2, Plus, Users,
-  Eye, Activity, AlertTriangle, CheckCircle2, XCircle, FileText
+  Activity, CheckCircle2, XCircle
 } from 'lucide-react'
 
 export function UserManagement() {

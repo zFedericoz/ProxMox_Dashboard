@@ -4,8 +4,8 @@ import { Card, CardHeader, CardBody } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { Input, Select } from '../components/ui/Input'
 import { useToast } from '../components/ui/Toast'
-import { DollarSign, Zap, Server, Save, RefreshCw, AlertTriangle, Lightbulb, ChevronUp, ChevronDown, X } from 'lucide-react'
-import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts'
+import { DollarSign, Zap, Save, RefreshCw, AlertTriangle, ChevronUp, ChevronDown, X } from 'lucide-react'
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts'
 
 const fmt = {
   eur: (v) => `EUR ${(v || 0).toFixed(2)}`

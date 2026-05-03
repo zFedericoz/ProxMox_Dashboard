@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 from starlette.requests import ClientDisconnect
 
-import requests
+from proxmoxer import ProxmoxAPI, AuthenticationError, ResourceException
 
 from config import settings
 
@@ -27,34 +27,22 @@ def _fetch_cluster_node_names(host: str, port: int, timeout: int) -> list[str]:
     If Proxmox is unreachable, returns empty list (validation skipped).
     Always authenticates as root@pam via username/password.
     """
-    base_url = f"https://{host}:{port}/api2/json"
-    verify = bool(settings.PROXMOX_VERIFY_SSL)
-
     try:
-        r = requests.post(
-            f"{base_url}/access/ticket",
-            data={"username": "root@pam", "password": settings.PROXMOX_PASSWORD},
+        proxmox = ProxmoxAPI(
+            host,
+            port=port,
+            user="root@pam",
+            password=settings.PROXMOX_PASSWORD,
+            verify_ssl=bool(settings.PROXMOX_VERIFY_SSL),
             timeout=timeout,
-            verify=verify,
         )
-        if r.status_code == 401:
+        data = proxmox.nodes.get()
+        return [n.get("node") for n in (data or []) if n.get("node")]
+    except (AuthenticationError, ResourceException) as e:
+        if e.status_code == 401:
             raise HTTPException(status_code=401, detail="Credenziali Proxmox non valide (401)")
-        if r.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Proxmox auth failed: HTTP {r.status_code}")
-
-        ticket = r.json().get("data", {}).get("ticket")
-        if not ticket:
-            raise HTTPException(status_code=502, detail="Proxmox auth failed: missing ticket")
-
-        headers = {"Cookie": f"PVEAuthCookie={ticket}"}
-        r = requests.get(f"{base_url}/nodes", headers=headers, timeout=timeout, verify=verify)
-        if r.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Proxmox nodes list failed: HTTP {r.status_code}")
-        data = r.json().get("data") or []
-        return [n.get("node") for n in data if n.get("node")]
-    except requests.exceptions.ConnectTimeout:
         return []
-    except requests.exceptions.ConnectionError:
+    except Exception:
         return []
 
 
