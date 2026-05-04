@@ -5,7 +5,7 @@ import { StatusBadge } from '../components/ui/Badge'
 import { Cpu, HardDrive, Search, ChevronUp, ChevronDown, Filter, X, AlertCircle } from 'lucide-react'
 
 export function Services() {
-  const { data, loading, error, refetch } = useApi('/api/services', { refetchInterval: 60000 })
+  const { data, error, refetch } = useApi('/api/services', { refetchInterval: 60000 })
   
   const services = useMemo(() => {
     if (!data) return {}

@@ -18,6 +18,12 @@ services:
       - LOGS_POLL_INTERVAL=${LOGS_POLL_INTERVAL:-10}
       - SERVICES_POLL_INTERVAL=${SERVICES_POLL_INTERVAL:-60}
       - PROXMOX_VERIFY_SSL=${PROXMOX_VERIFY_SSL:-false}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - dashboard-network
 
@@ -31,7 +37,8 @@ services:
     ports:
       - "8000:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - dashboard-network
 

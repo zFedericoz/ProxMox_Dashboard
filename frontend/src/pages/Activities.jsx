@@ -3,7 +3,7 @@ import { useApi } from '../hooks/useApi'
 import { Card, CardHeader, CardBody } from '../components/ui/Card'
 import { StatusBadge } from '../components/ui/Badge'
 import { formatDate } from '../utils/dateUtils'
-import { Activity, Search, ChevronUp, ChevronDown, Filter, X } from 'lucide-react'
+import { Activity, ChevronUp, ChevronDown, Filter, X } from 'lucide-react'
 
 export function Activities() {
   const { data: tasksData, refetch: refetchTasks } = useApi('/api/tasks', { params: { limit: 50 }, refetchInterval: 30000 })
