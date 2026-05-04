@@ -4,8 +4,8 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { Card, CardHeader, CardBody } from '../components/ui/Card'
 import { CardStat } from '../components/ui/Card'
 import { Badge, StatusBadge } from '../components/ui/Badge'
-import { 
-  Server, Monitor, Container, Bell, AlertTriangle, Activity
+import {
+  Server, Monitor, Container, Bell, AlertTriangle, Activity, Cpu, MemoryStick, HardDrive
 } from 'lucide-react'
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
@@ -89,7 +89,7 @@ function TaskManagerChart({ title, icon, data, dataKey, color, unit = '%' }) {
 }
 
 export function Overview() {
-  const { data: summary } = useApi('/api/cluster/summary', { 
+  const { data: summary, loading } = useApi('/api/cluster/summary', {
     refetchInterval: 30000,
     staleTime: 10000 
   })
@@ -151,7 +151,7 @@ export function Overview() {
     setDiskHistory([])
   }, [selectedNode])
 
-  if (loading && !summary) return <LoadingSkeleton />
+  if (loading && !summary) return null
 
   const nodes = summary?.nodes || []
   const liveAlerts = alerts?.live_alerts || []
