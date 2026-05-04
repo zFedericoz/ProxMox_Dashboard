@@ -93,7 +93,7 @@ docker-compose down && docker-compose build --no-cache && docker-compose up -d
 ## Credenziali Default
 
 - **Username:** admin
-- **Password:** admin
+- **Password:** admin123
 
 ## Struttura
 

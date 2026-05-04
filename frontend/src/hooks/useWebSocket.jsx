@@ -73,11 +73,7 @@ export function WebSocketProvider({ children }) {
     
     const pingInterval = setInterval(() => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        try {
-          wsRef.current.send('ping')
-        } catch (e) {
-          console.warn('Failed to send ping:', e)
-        }
+        wsRef.current.send('ping')
       }
     }, 30000)
 
@@ -88,7 +84,7 @@ export function WebSocketProvider({ children }) {
         clearTimeout(reconnectTimeoutRef.current)
       }
       if (wsRef.current) {
-        wsRef.current.close(1000, 'Component unmount')
+        wsRef.current.close()
         wsRef.current = null
       }
     }

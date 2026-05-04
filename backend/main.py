@@ -7,7 +7,6 @@ import json
 import time
 import asyncio
 import threading
-import logging
 import urllib.parse
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
@@ -40,62 +39,12 @@ from api.nodes import router as nodes_router
 from api.alerts import router as alerts_router
 from api.clusters import router as clusters_router
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    try:
-        init_db()
-        init_clusters_table()
-    except Exception as e:
-        print(f"  ❌ FATAL: Cannot initialize database: {e}")
-        print("  Verify AWS Secrets Manager credentials and RDS endpoint.")
-        raise SystemExit(1)
-    ensure_default_users()
-    _load_frontend_html()
-    print(f"\n{'='*50}")
-    print(f"  {settings.APP_NAME} v{settings.APP_VERSION}")
-    print(f"{'='*50}")
-    index_ok = (FRONTEND_DIR / "index.html").exists()
-    print(f"\n  Frontend dir : {FRONTEND_DIR}")
-    print(f"  index.html   : {'OK' if index_ok else 'NON TROVATO! (servito da nginx)'}")
-    print(f"\nLoading Proxmox nodes from database...")
-    init_cluster_from_db()
-    
-    # Connect nodes in background (non-blocking)
-    asyncio.create_task(_connect_nodes_async())
-    
-    print(f"\nDashboard ready at http://0.0.0.0:{settings.PORT}")
-    print(f"Apri nel browser: http://localhost:{settings.PORT}")
-    print(f"API docs: http://localhost:{settings.PORT}/api/docs\n")
-    log_activity("system", "Dashboard started", severity="info")
-    asyncio.create_task(metrics_collector())
-    
-    yield
-    
-    # Shutdown
-    global background_task_running
-    background_task_running = False
-    log_activity("system", "Dashboard stopped", severity="info")
-
-
-async def _connect_nodes_async():
-    """Connects Proxmox nodes in background."""
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _connect_nodes_background)
-
-
-def _connect_nodes_background():
-    """Connects Proxmox nodes in background thread."""
-    cluster.connect_all()
-    cluster.discover_from_cluster()
-
 # ─── App Setup ────────────────────────────────────────────────────────────────
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     docs_url="/api/docs",
-    redoc_url=None,
-    lifespan=lifespan
+    redoc_url=None
 )
 
 # Routers
@@ -283,57 +232,20 @@ async def api_cache_middleware(request: Request, call_next):
 
     if cached:
         client_etag = request.headers.get("If-None-Match")
-        server_etag = _generate_etag(cached)
-        if client_etag and client_etag == server_etag:
-            return JSONResponse(status_code=304, content=None, headers={"ETag": server_etag})
-        return JSONResponse(content=cached, headers={
-            "ETag": server_etag,
-            "Cache-Control": "public, max-age=10"
-        })
+        if client_etag and client_etag == cached.get("etag"):
+            return JSONResponse(status_code=304, content=None)
 
     response = await call_next(request)
 
-    # FastAPI/Starlette returns a StreamingResponse whose body_iterator must be
-    # consumed to read the body.  Once consumed the iterator is exhausted, so we
-    # MUST always rebuild the response from the raw bytes — otherwise the client
-    # receives an empty body while Content-Length says something else
-    # (→ ERR_CONTENT_LENGTH_MISMATCH).
-    #
-    # GZipMiddleware sits INSIDE this middleware (closer to the route handler),
-    # so the bytes we read here may already be gzip-compressed.  We attempt to
-    # parse them as JSON; if that fails (gzip case) we still rebuild the response
-    # faithfully with the original headers (Content-Encoding, Content-Length, …).
-    if response.status_code == 200:
+    if response.status_code == 200 and hasattr(response, "body"):
         try:
-            from starlette.responses import Response as StarletteResponse
-            chunks = []
-            async for chunk in response.body_iterator:
-                chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
-            body = b"".join(chunks)
-
-            # Preserve all original headers so Content-Encoding / Content-Length
-            # stay consistent with the actual body bytes we are about to send.
-            rebuilt_headers = dict(response.headers)
-
-            # Attempt JSON parse + cache (only succeeds when body is NOT gzip)
-            try:
+            body = response.body
+            if body:
                 data = json.loads(body)
                 etag = _generate_etag(data)
                 _set_cached_response(cache_key, data)
-                rebuilt_headers["ETag"] = etag
-                rebuilt_headers["Cache-Control"] = "public, max-age=10"
-            except Exception:
-                # Body is compressed (gzip) or not JSON — skip caching,
-                # but still rebuild the response so the iterator is valid.
-                pass
-
-            # Always rebuild so the body_iterator is not left exhausted.
-            return StarletteResponse(
-                content=body,
-                status_code=200,
-                media_type=response.media_type or "application/json",
-                headers=rebuilt_headers,
-            )
+                response.headers["ETag"] = etag
+                response.headers["Cache-Control"] = "public, max-age=10"
         except Exception:
             pass
 
@@ -464,7 +376,7 @@ def ensure_default_users():
                 "INSERT INTO users (username, password_hash, email, role, is_active) VALUES (%s, %s, %s, %s, %s)",
                 ("admin", admin_hash, "admin@dashboard.local", "admin", True)
             )
-            print("  ✅ Default user 'admin' created (password: admin)")
+            print("  ✅ Default user 'admin' created")
         # Check if viewer exists
         conn.execute("SELECT 1 FROM users WHERE username = %s", ("user",))
         if not conn.fetchone():
@@ -473,14 +385,39 @@ def ensure_default_users():
                 "INSERT INTO users (username, password_hash, email, role, is_active) VALUES (%s, %s, %s, %s, %s)",
                 ("user", user_hash, "user@dashboard.local", "viewer", True)
             )
-            print("  ✅ Default user 'user' created (password: user)")
+            print("  ✅ Default user 'user' created")
         conn.commit()
         conn.close()
-        print("  ✅ Database connection OK")
     except Exception as e:
-        print(f"  ❌ FATAL: Cannot connect to database: {e}")
-        print("  Verify AWS Secrets Manager credentials and RDS endpoint.")
-        raise SystemExit(1)
+        print(f"  ⚠️  Error creating default users: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+    init_clusters_table()
+    ensure_default_users()
+    _load_frontend_html()
+    print(f"\n{'='*50}")
+    print(f"  {settings.APP_NAME} v{settings.APP_VERSION}")
+    print(f"{'='*50}")
+    index_ok = (FRONTEND_DIR / "index.html").exists()
+    print(f"\n  Frontend dir : {FRONTEND_DIR}")
+    print(f"  index.html   : {'OK' if index_ok else 'NON TROVATO!'}")
+    if not index_ok:
+        print(f"\n  [ATTENZIONE] Frontend non trovato.")
+    print(f"\nLoading Proxmox nodes from database...")
+    init_cluster_from_db()
+    print(f"\nDashboard ready at http://0.0.0.0:{settings.PORT}")
+    print(f"Apri nel browser: http://localhost:{settings.PORT}")
+    print(f"API docs: http://localhost:{settings.PORT}/api/docs\n")
+    log_activity("system", "Dashboard started", severity="info")
+    asyncio.create_task(metrics_collector())
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global background_task_running
+    background_task_running = False
+    log_activity("system", "Dashboard stopped", severity="info")
 
 # ─── Routes: Frontend ─────────────────────────────────────────────────────────
 @app.get("/")
@@ -500,13 +437,8 @@ async def login(request: Request):
     body     = await request.json()
     username = body.get("username", "")
     password = body.get("password", "")
-    try:
-        user = verify_user(username, password)
-    except Exception as e:
-        logger.error(f"Login DB error for user '{username}': {e}")
-        raise HTTPException(status_code=500, detail="Errore di connessione al database")
+    user     = verify_user(username, password)
     if not user:
-        logger.warning(f"Login failed for user '{username}' from {request.client.host if request.client else 'unknown'}")
         log_activity(username, "Login failed", status="failed",
                      ip_address=request.client.host if request.client else None,
                      severity="warning")
@@ -519,7 +451,6 @@ async def login(request: Request):
         conn.commit()
     
     access_token = create_access_token({"sub": username, "role": user["role"]})
-    logger.info(f"Login successful for user '{username}'")
     log_activity(username, "Login successful",
                  ip_address=request.client.host if request.client else None)
     return {"success": True, "username": username, "role": user["role"], "access_token": access_token}
@@ -1142,7 +1073,7 @@ async def delete_backup(node: str, storage: str, volid: str, request: Request):
     if not pnode.connected:
         raise HTTPException(status_code=503, detail=f"Nodo '{node}' non raggiungibile")
     try:
-        result = pnode.delete_storage_content(storage, volid)
+        result = pnode._delete(f"/nodes/{node}/storage/{storage}/content/{volid}")
         if result is None:
             raise HTTPException(status_code=500, detail=pnode.last_error or "Errore eliminazione backup")
         log_activity("admin", f"Backup eliminato: {volid} su {storage}",
@@ -1170,7 +1101,12 @@ async def restore_backup(node: str, storage: str, request: Request):
         # Proxmox API: restore = POST /nodes/{node}/qemu (o /lxc), stesso endpoint
         # della creazione VM con il param 'archive' che punta al volid del backup.
         vtype = "lxc" if "lxc" in volid.lower() else "qemu"
-        result = pnode.restore_from_backup(vmid, volid, target_storage, vtype)
+        result = pnode._post(f"/nodes/{node}/{vtype}", {
+            "vmid": vmid,
+            "archive": volid,
+            "storage": target_storage,
+            "force": 1,
+        })
         if result is None:
             raise HTTPException(status_code=500, detail=pnode.last_error or "Errore ripristino")
         cluster.invalidate_cache()
@@ -1556,8 +1492,6 @@ async def admin_delete_user(username: str, request: Request):
         log_activity("admin", f"Utente eliminato: {username}", severity="critical")
         return {"success": True}
 
-logger = logging.getLogger("uvicorn.error")
-
 # ─── WebSocket ────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -1585,33 +1519,20 @@ async def websocket_endpoint(websocket: WebSocket):
             except asyncio.TimeoutError:
                 pass
     except WebSocketDisconnect:
-        logger.info("Client WebSocket disconnected normally")
         manager.disconnect(websocket)
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+    except Exception:
         manager.disconnect(websocket)
 
 # ─── Health check ─────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
-    db_status = "unknown"
-    try:
-        conn = get_db()
-        conn.execute("SELECT 1")
-        conn.fetchone()
-        conn.close()
-        db_status = "ok"
-    except Exception as e:
-        db_status = f"error: {e}"
     return {
         "status": "ok",
-        "database": db_status,
         "app": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "timestamp": datetime.now().isoformat(),
         "nodes_configured": len(cluster.nodes),
-        "nodes_connected": sum(1 for n in cluster.nodes.values() if n.connected),
-        "db_host": settings.DB_HOST[:30] + "..." if len(settings.DB_HOST) > 30 else settings.DB_HOST,
+        "nodes_connected": sum(1 for n in cluster.nodes.values() if n.connected)
     }
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────

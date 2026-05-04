@@ -39,11 +39,8 @@ const routes = [
 ]
 
 function RequireAuth({ children }) {
-  const { isAuthenticated, loading } = useAuth()
+  const { isAuthenticated } = useAuth()
   const location = useLocation()
-
-  // Wait for session storage to be read before deciding
-  if (loading) return null
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location }} />
@@ -53,11 +50,8 @@ function RequireAuth({ children }) {
 }
 
 function LoginRoute() {
-  const { isAuthenticated, loading } = useAuth()
+  const { isAuthenticated } = useAuth()
   const location = useLocation()
-
-  // Wait for session storage to be read before deciding
-  if (loading) return null
 
   if (isAuthenticated) {
     const to = location.state?.from?.pathname || '/'
