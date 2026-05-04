@@ -7,11 +7,13 @@ services:
     container_name: proxmox-dashboard-backend
     restart: unless-stopped
     environment:
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+      # IAM role credentials (ECS task role, EC2 instance profile, etc.) — no keys needed.
+      # For local Docker without a role, export keys or mount ~/.aws and set AWS_PROFILE.
       - AWS_REGION=${AWS_REGION:-eu-west-1}
       - AWS_SECRETS_SECRET_NAME=${AWS_SECRETS_SECRET_NAME:-syam-projectwork-pontos}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
       - PORT=8000
       - DEBUG=${DEBUG:-false}
       - METRICS_POLL_INTERVAL=${METRICS_POLL_INTERVAL:-30}

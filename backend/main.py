@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
         init_clusters_table()
     except Exception as e:
         print(f"  ❌ FATAL: Cannot initialize database: {e}")
-        print("  Verify AWS Secrets Manager credentials and RDS endpoint.")
+        print("  Verify IAM permissions for Secrets Manager and the RDS endpoint.")
         raise SystemExit(1)
     ensure_default_users()
     _load_frontend_html()
@@ -479,7 +479,7 @@ def ensure_default_users():
         print("  ✅ Database connection OK")
     except Exception as e:
         print(f"  ❌ FATAL: Cannot connect to database: {e}")
-        print("  Verify AWS Secrets Manager credentials and RDS endpoint.")
+        print("  Verify IAM permissions for Secrets Manager and the RDS endpoint.")
         raise SystemExit(1)
 
 # ─── Routes: Frontend ─────────────────────────────────────────────────────────

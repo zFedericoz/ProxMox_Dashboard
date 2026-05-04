@@ -1,6 +1,11 @@
 """
 Configuration settings for the Proxmox Dashboard.
-All secrets loaded from AWS Secrets Manager.
+
+Secrets (DB, JWT, Proxmox tokens) load from AWS Secrets Manager using IAM-based
+authentication — attach a role with secretsmanager:GetSecretValue (see README).
+
+Non-secret tuning (poll intervals, DEBUG, etc.) can still be overridden via
+environment variables set by your orchestrator (ECS, Kubernetes, systemd), not a .env file.
 """
 from pydantic_settings import BaseSettings
 from typing import List, Dict, Any

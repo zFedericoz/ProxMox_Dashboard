@@ -4,6 +4,12 @@ Loads all secrets from a single AWS Secret containing:
   - DB credentials (DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
   - Proxmox tokens (CLUSTER1_PROXMOX_TOKEN_NAME, CLUSTER1_PROXMOX_TOKEN_VALUE, CLUSTER2_*, ...)
   - JWT SECRET_KEY
+
+Authentication (no .env required in AWS):
+  - Prefer an IAM role (EC2 instance profile, ECS/Lambda task role, EKS IRSA, etc.).
+  - boto3 uses the default credential chain when AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+    are not both set.
+  - Optional: static keys or AWS_PROFILE via ~/.aws for local development only.
 """
 import os
 import logging
@@ -19,14 +25,25 @@ AWS_REGION = os.environ.get("AWS_REGION", "eu-west-1")
 
 
 def get_secrets_manager_client():
-    client = boto3.client(
-        "secretsmanager",
-        region_name=AWS_REGION,
-        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-        aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
-    )
-    return client
+    """
+    Build a Secrets Manager client using static keys only when both are present;
+    otherwise use the default AWS credential chain (IAM role, SSO, profile, etc.).
+    """
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    token = os.environ.get("AWS_SESSION_TOKEN")
+
+    if access_key and secret_key:
+        session = boto3.Session(
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            aws_session_token=token or None,
+            region_name=AWS_REGION,
+        )
+    else:
+        session = boto3.Session(region_name=AWS_REGION)
+
+    return session.client("secretsmanager")
 
 
 def get_secret(secret_name: str = None) -> Dict[str, Any]:
@@ -43,7 +60,10 @@ def get_secret(secret_name: str = None) -> Dict[str, Any]:
         logger.error(f"AWS Secrets Manager error: {e}")
         raise
     except NoCredentialsError:
-        logger.error("AWS credentials not found")
+        logger.error(
+            "AWS credentials not found. Attach an IAM role with secretsmanager:GetSecretValue "
+            "or configure credentials (e.g. aws configure / SSO for local dev)."
+        )
         raise
 
 
