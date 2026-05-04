@@ -15,6 +15,79 @@ const fmt = {
   pct: (v) => `${(v||0).toFixed(1)}%`,
 }
 
+function TaskManagerChart({ title, icon, data, dataKey, color, unit = '%' }) {
+  const currentValue = data.length > 0 ? data[data.length - 1][dataKey] : 0
+  const avgValue = data.length > 0
+    ? data.reduce((sum, d) => sum + (d[dataKey] || 0), 0) / data.length
+    : 0
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          {icon}
+          <span>{title}</span>
+        </div>
+        <div className="flex items-baseline gap-1">
+          <span className="text-2xl font-bold" style={{ color }}>{currentValue.toFixed(1)}</span>
+          <span className="text-xs text-gray-500">{unit}</span>
+        </div>
+      </CardHeader>
+      <CardBody>
+        <div className="flex justify-between text-xs text-gray-500 mb-2 px-1">
+          <span>Media: {avgValue.toFixed(1)}{unit}</span>
+          <span>Min: {data.length > 0 ? Math.min(...data.map(d => d[dataKey] || 0)).toFixed(1) : '0.0'}{unit}</span>
+          <span>Max: {data.length > 0 ? Math.max(...data.map(d => d[dataKey] || 0)).toFixed(1) : '0.0'}{unit}</span>
+        </div>
+        <div className="h-40">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={data}>
+              <defs>
+                <linearGradient id={`gradient-${dataKey}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={color} stopOpacity={0.5} />
+                  <stop offset="100%" stopColor={color} stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+              <XAxis 
+                dataKey="time" 
+                stroke="#374151" 
+                fontSize={11} 
+                tickLine={false}
+                tick={({ x, y, payload }) => {
+                  const idx = data.indexOf(payload)
+                  if (idx % Math.max(1, Math.floor(data.length / 6)) !== 0) return null
+                  return <text x={x} y={y} dy={16} textAnchor="middle" fill="#6b7280" fontSize={11}>{payload.value}</text>
+                }}
+              />
+              <YAxis stroke="#374151" fontSize={11} domain={[0, 100]} tickLine={false} tickCount={5} />
+              <Tooltip
+                contentStyle={{ 
+                  backgroundColor: '#111827', 
+                  border: '1px solid #374151',
+                  borderRadius: '8px',
+                  fontSize: '12px'
+                }}
+                labelStyle={{ color: '#f3f4f6', marginBottom: '4px' }}
+                formatter={(value) => [`${value.toFixed(1)}${unit}`, title]}
+              />
+              <Area
+                type="monotone"
+                dataKey={dataKey}
+                stroke={color}
+                strokeWidth={2}
+                fill={`url(#gradient-${dataKey})`}
+                name={title}
+                isAnimationActive={false}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </CardBody>
+    </Card>
+  )
+}
+
 export function Overview() {
   const { data: summary } = useApi('/api/cluster/summary', { 
     refetchInterval: 30000,
@@ -30,7 +103,9 @@ export function Overview() {
   })
   const { subscribe } = useWebSocket()
 
-  const [metricsHistory, setMetricsHistory] = useState([])
+  const [cpuHistory, setCpuHistory] = useState([])
+  const [ramHistory, setRamHistory] = useState([])
+  const [diskHistory, setDiskHistory] = useState([])
   const [selectedNode, setSelectedNode] = useState('')
   const [showNodeSelector, setShowNodeSelector] = useState(false)
   const lastUpdateRef = useRef(0)
@@ -41,29 +116,28 @@ export function Overview() {
     if (now - lastUpdateRef.current < 5000) return
     lastUpdateRef.current = now
     
-    setMetricsHistory(prev => {
-      const targetNode = selectedNode || 'cluster'
-      let cpu = data.used_cpu_percent || 0
-      let mem = data.used_mem_percent || 0
-      let disk = data.used_disk_percent || 0
-      
-      if (selectedNode && data.nodes) {
-        const node = data.nodes.find(n => n.name === selectedNode)
-        if (node) {
-          cpu = node.cpu_usage || 0
-          mem = node.mem_percent || 0
-          disk = node.disk_percent || 0
-        }
+    const time = new Date().toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    
+    let cpu = data.used_cpu_percent || 0
+    let mem = data.used_mem_percent || 0
+    let disk = data.used_disk_percent || 0
+    
+    if (selectedNode && data.nodes) {
+      const node = data.nodes.find(n => n.name === selectedNode)
+      if (node) {
+        cpu = node.cpu_usage || 0
+        mem = node.mem_percent || 0
+        disk = node.disk_percent || 0
       }
-      
-      const newPoint = {
-        time: new Date().toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' }),
-        cpu,
-        mem,
-        disk
-      }
-      return [...prev.slice(-29), newPoint]
-    })
+    }
+    
+    const cpuPoint = { time, value: cpu }
+    const ramPoint = { time, value: mem }
+    const diskPoint = { time, value: disk }
+    
+    setCpuHistory(prev => [...prev.slice(-59), cpuPoint])
+    setRamHistory(prev => [...prev.slice(-59), ramPoint])
+    setDiskHistory(prev => [...prev.slice(-59), diskPoint])
   }, [selectedNode])
 
   useEffect(() => {
@@ -71,6 +145,17 @@ export function Overview() {
     return unsubscribe
   }, [subscribe, handleMetricsUpdate])
 
+<<<<<<< proxmoxAPI
+=======
+  useEffect(() => {
+    setCpuHistory([])
+    setRamHistory([])
+    setDiskHistory([])
+  }, [selectedNode])
+
+  if (loading && !summary) return <LoadingSkeleton />
+
+>>>>>>> main
   const nodes = summary?.nodes || []
   const liveAlerts = alerts?.live_alerts || []
   const recentTasks = (tasks?.tasks || []).slice(0, 8)
@@ -104,97 +189,63 @@ export function Overview() {
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2">
-          <Card>
-            <CardHeader>
-              <span>Utilizzo Risorse {selectedNode || 'Cluster'} (30 min)</span>
-              <button
-                onClick={() => setShowNodeSelector(!showNodeSelector)}
-                className="ml-auto text-xs text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
-              >
-                {selectedNode ? `Nodo: ${selectedNode}` : 'Tutti i nodi'}
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-            </CardHeader>
-            {showNodeSelector && (
-              <div className="px-4 pb-2 flex flex-wrap gap-2">
-                <button
-                  onClick={() => { setSelectedNode(''); setShowNodeSelector(false); }}
-                  className={`px-3 py-1 text-xs rounded-full ${!selectedNode ? 'bg-cyan-500 text-gray-900' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
-                >
-                  Tutti
-                </button>
-                {nodes.map(node => (
-                  <button
-                    key={node.name}
-                    onClick={() => { setSelectedNode(node.name); setShowNodeSelector(false); }}
-                    className={`px-3 py-1 text-xs rounded-full ${selectedNode === node.name ? 'bg-cyan-500 text-gray-900' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
-                  >
-                    {node.name}
-                  </button>
-                ))}
-              </div>
-            )}
-            <CardBody>
-              <div className="h-64">
-                {metricsHistory.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={metricsHistory}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                      <XAxis dataKey="time" stroke="#9ca3af" fontSize={12} />
-                      <YAxis stroke="#9ca3af" fontSize={12} domain={[0, 100]} />
-                      <Tooltip
-                        contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }}
-                        labelStyle={{ color: '#f3f4f6' }}
-                      />
-                      <Area type="monotone" dataKey="cpu" stackId="1" stroke="#22d3ee" fill="#22d3ee" fillOpacity={0.6} name="CPU %" />
-                      <Area type="monotone" dataKey="mem" stackId="1" stroke="#a855f7" fill="#a855f7" fillOpacity={0.4} name="RAM %" />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="h-full flex items-center justify-center text-gray-500">
-                    Dati in caricamento...
-                  </div>
-                )}
-              </div>
-            </CardBody>
-          </Card>
-        </div>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-white">
+          Monitoraggio {selectedNode || 'Cluster'}
+        </h2>
+        <button
+          onClick={() => setShowNodeSelector(!showNodeSelector)}
+          className="text-xs text-cyan-400 hover:text-cyan-300 flex items-center gap-1 bg-gray-800 px-3 py-1.5 rounded-lg border border-gray-700"
+        >
+          {selectedNode ? `Nodo: ${selectedNode}` : 'Tutti i nodi'}
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+      </div>
 
-        <Card>
-          <CardHeader>
-            <span>Alert Live</span>
-            {liveAlerts.length > 0 && (
-              <Badge variant="danger">{liveAlerts.length}</Badge>
-            )}
-          </CardHeader>
-          <CardBody className="p-0">
-            {liveAlerts.length === 0 && (!alerts?.alerts || alerts.alerts.length === 0) ? (
-              <div className="p-4 text-center text-green-400">
-                <Activity size={24} className="mx-auto mb-2" />
-                <p>Nessun alert attivo</p>
-              </div>
-            ) : (
-              <div className="divide-y divide-gray-800 max-h-64 overflow-y-auto">
-                {[...liveAlerts, ...(alerts?.alerts || [])].slice(0, 6).map((alert, i) => (
-                  <div key={i} className="p-3 flex items-start gap-3 hover:bg-gray-800/50">
-                    <AlertTriangle size={16} className={
-                      alert.severity === 'critical' ? 'text-red-400 mt-0.5' :
-                      alert.severity === 'warning' ? 'text-yellow-400 mt-0.5' : 'text-blue-400 mt-0.5'
-                    } />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-gray-200 truncate">{alert.message || alert.msg}</p>
-                      <p className="text-xs text-gray-500 mt-0.5">{alert.node} · {new Date(alert.timestamp * 1000).toLocaleString('it-IT')}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardBody>
-        </Card>
+      {showNodeSelector && (
+        <div className="flex flex-wrap gap-2 bg-gray-900 border border-gray-800 rounded-lg p-3">
+          <button
+            onClick={() => setSelectedNode('')}
+            className={`px-3 py-1 text-xs rounded-full ${!selectedNode ? 'bg-cyan-500 text-gray-900' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+          >
+            Tutti
+          </button>
+          {nodes.map(node => (
+            <button
+              key={node.name}
+              onClick={() => setSelectedNode(node.name)}
+              className={`px-3 py-1 text-xs rounded-full ${selectedNode === node.name ? 'bg-cyan-500 text-gray-900' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+            >
+              {node.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <TaskManagerChart
+          title="CPU"
+          icon={<Cpu size={16} className="text-cyan-400" />}
+          data={cpuHistory}
+          dataKey="value"
+          color="#22d3ee"
+        />
+        <TaskManagerChart
+          title="RAM"
+          icon={<MemoryStick size={16} className="text-purple-400" />}
+          data={ramHistory}
+          dataKey="value"
+          color="#a855f7"
+        />
+        <TaskManagerChart
+          title="Disco"
+          icon={<HardDrive size={16} className="text-green-400" />}
+          data={diskHistory}
+          dataKey="value"
+          color="#22c55e"
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -235,21 +286,24 @@ export function Overview() {
         </Card>
 
         <Card>
-          <CardHeader>Task Recenti</CardHeader>
+          <CardHeader>Alert Live</CardHeader>
           <CardBody className="p-0">
-            {recentTasks.length === 0 ? (
-              <div className="p-4 text-center text-gray-500">Nessun task recente</div>
+            {liveAlerts.length === 0 && (!alerts?.alerts || alerts.alerts.length === 0) ? (
+              <div className="p-4 text-center text-green-400">
+                <Activity size={24} className="mx-auto mb-2" />
+                <p>Nessun alert attivo</p>
+              </div>
             ) : (
-              <div className="divide-y divide-gray-800 max-h-80 overflow-y-auto">
-                {recentTasks.map((task, i) => (
-                  <div key={i} className="p-3 flex items-center justify-between hover:bg-gray-800/50">
-                    <div className="flex items-center gap-3">
-                      <span className="text-xs text-gray-500 font-mono">{task.node}</span>
-                      <span className="text-sm text-gray-200">{task.type || 'task'}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <StatusBadge status={task.status} />
-                      <span className="text-xs text-gray-500">{new Date(task.starttime * 1000).toLocaleTimeString('it-IT')}</span>
+              <div className="divide-y divide-gray-800 max-h-64 overflow-y-auto">
+                {[...liveAlerts, ...(alerts?.alerts || [])].slice(0, 6).map((alert, i) => (
+                  <div key={i} className="p-3 flex items-start gap-3 hover:bg-gray-800/50">
+                    <AlertTriangle size={16} className={
+                      alert.severity === 'critical' ? 'text-red-400 mt-0.5' :
+                      alert.severity === 'warning' ? 'text-yellow-400 mt-0.5' : 'text-blue-400 mt-0.5'
+                    } />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-gray-200 truncate">{alert.message || alert.msg}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">{alert.node} · {new Date(alert.timestamp * 1000).toLocaleString('it-IT')}</p>
                     </div>
                   </div>
                 ))}
@@ -258,6 +312,28 @@ export function Overview() {
           </CardBody>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>Task Recenti</CardHeader>
+        <CardBody className="p-0">
+          {recentTasks.length === 0 ? (
+            <div className="p-4 text-center text-gray-500">Nessun task recente</div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+              {recentTasks.map((task, i) => (
+                <div key={i} className="p-3 bg-gray-800/50 rounded-lg hover:bg-gray-800 transition-colors">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-gray-500 font-mono">{task.node}</span>
+                    <StatusBadge status={task.status} />
+                  </div>
+                  <p className="text-sm text-gray-200 truncate">{task.type || 'task'}</p>
+                  <p className="text-xs text-gray-500 mt-1">{new Date(task.starttime * 1000).toLocaleTimeString('it-IT')}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardBody>
+      </Card>
     </div>
   )
 }
