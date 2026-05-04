@@ -16,8 +16,6 @@ const pageTitles = {
   governance: 'Governance',
 }
 
-const pageComponents = {}
-
 export function Layout({ children, currentPage, onNavigate }) {
   const [collapsed, setCollapsed] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)

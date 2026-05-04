@@ -44,7 +44,7 @@ export function ClusterHealth() {
   const drsEndpoint = selectedId ? `/api/cluster/drs?cluster_id=${selectedId}` : '/api/cluster/drs'
   const placementEndpoint = selectedId ? `/api/cluster/placement?cluster_id=${selectedId}` : '/api/cluster/placement'
 
-  const { data: healthData, loading, refetch } = useApi(healthEndpoint, { refetchInterval: 30000 })
+  const { data: healthData, refetch } = useApi(healthEndpoint, { refetchInterval: 30000 })
   const { data: drsData } = useApi(drsEndpoint, { refetchInterval: 60000 })
   const { data: placementData } = useApi(placementEndpoint, { refetchInterval: 60000 })
 

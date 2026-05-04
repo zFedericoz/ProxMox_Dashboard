@@ -5,7 +5,7 @@ import { Button } from '../components/ui/Button'
 import { useToast } from '../components/ui/Toast'
 import { Modal } from '../components/ui/Modal'
 import {
-  Plus, Edit2, Trash2, Server, Wifi, WifiOff, Save, RefreshCw,
+  Plus, Edit2, Trash2, Server, Wifi, WifiOff, Save,
   Layers, ChevronDown, ChevronRight, Link, Unlink, Network
 } from 'lucide-react'
 
