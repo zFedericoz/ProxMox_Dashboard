@@ -262,7 +262,7 @@ export function Overview() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
-          <CardHeader>Nodi Cluster</CardHeader>
+          <CardHeader>Tutti i nodi</CardHeader>
           <CardBody className="p-0">
             <div className="divide-y divide-gray-800">
               {nodes.map((node) => (
