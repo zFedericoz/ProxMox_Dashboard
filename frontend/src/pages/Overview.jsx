@@ -5,14 +5,29 @@ import { Card, CardHeader, CardBody } from '../components/ui/Card'
 import { CardStat } from '../components/ui/Card'
 import { Badge, StatusBadge } from '../components/ui/Badge'
 import { 
-  Server, Monitor, Container, Bell, AlertTriangle, Activity
+  Server, Monitor, Container, Cpu, HardDrive, MemoryStick,
+  Activity, Bell, AlertTriangle
 } from 'lucide-react'
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from 'recharts'
 
 const fmt = {
+  bytes: (b) => {
+    if (!b) return '0 B'
+    const u = ['B','KB','MB','GB','TB']
+    let i = 0
+    while (b >= 1024 && i < u.length-1) { b /= 1024; i++ }
+    return `${b.toFixed(1)} ${u[i]}`
+  },
   pct: (v) => `${(v||0).toFixed(1)}%`,
+  uptime: (s) => {
+    if (!s) return 'N/A'
+    const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60)
+    if (d>0) return `${d}g ${h}h`
+    if (h>0) return `${h}h ${m}m`
+    return `${m}m`
+  }
 }
 
 function TaskManagerChart({ title, icon, data, dataKey, color, unit = '%' }) {
@@ -89,7 +104,7 @@ function TaskManagerChart({ title, icon, data, dataKey, color, unit = '%' }) {
 }
 
 export function Overview() {
-  const { data: summary } = useApi('/api/cluster/summary', { 
+  const { data: summary, loading, error, refetch } = useApi('/api/cluster/summary', { 
     refetchInterval: 30000,
     staleTime: 10000 
   })
@@ -145,8 +160,6 @@ export function Overview() {
     return unsubscribe
   }, [subscribe, handleMetricsUpdate])
 
-<<<<<<< proxmoxAPI
-=======
   useEffect(() => {
     setCpuHistory([])
     setRamHistory([])
@@ -155,7 +168,6 @@ export function Overview() {
 
   if (loading && !summary) return <LoadingSkeleton />
 
->>>>>>> main
   const nodes = summary?.nodes || []
   const liveAlerts = alerts?.live_alerts || []
   const recentTasks = (tasks?.tasks || []).slice(0, 8)
@@ -334,6 +346,22 @@ export function Overview() {
           )}
         </CardBody>
       </Card>
+    </div>
+  )
+}
+
+function LoadingSkeleton() {
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {[1,2,3,4].map(i => (
+          <div key={i} className="h-24 bg-gray-900 rounded-xl animate-pulse" />
+        ))}
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 h-80 bg-gray-900 rounded-xl animate-pulse" />
+        <div className="h-80 bg-gray-900 rounded-xl animate-pulse" />
+      </div>
     </div>
   )
 }

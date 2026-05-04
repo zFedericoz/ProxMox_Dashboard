@@ -1,11 +1,10 @@
 """
 Proxmox API client - connects to all nodes and collects metrics.
 
-Uses proxmoxer for Proxmox API communication.
-
 Performance design:
   - Refresh proattivo in background: le richieste leggono SEMPRE dalla cache (0ms attesa Proxmox).
   - Threading lock: un solo refresh alla volta, nessun thundering herd.
+  - HTTP session con connection pool tuned per richieste parallele.
   - Cache unificata: un solo fetch per ciclo alimenta summary, vms e containers.
   - get_all_vms / get_all_containers non richiamano _ensure_fresh se la cache è già fresca.
   - save_metrics_snapshot usa cache diretta senza HTTP aggiuntivi.
@@ -16,17 +15,17 @@ import threading
 import urllib3
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
-
-from proxmoxer import ProxmoxAPI, AuthenticationError, ResourceException
+from concurrent.futures import ThreadPoolExecutor, as_completed, FIRST_COMPLETED
+from concurrent.futures import wait
+from requests.adapters import HTTPAdapter
 
 from config import settings
 from database import get_db, log_activity_async, get_cost_config, get_cost_config_nodes
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-CACHE_TTL      = 30
-CACHE_TTL_SLOW = 60
+CACHE_TTL      = 30   # secondi — leggermente più largo per ridurre refresh inutili
+CACHE_TTL_SLOW = 60   # secondi — servizi, storage, tasks
 
 _node_data_cache: Dict[str, Dict] = {}
 _cluster_summary_cache = {"data": None, "ts": 0}
@@ -35,7 +34,9 @@ _logs_cache            = {"data": None, "ts": 0}
 _storage_cache         = {"data": None, "ts": 0}
 _tasks_cache           = {"data": None, "ts": 0}
 
+# Lock: garantisce che un solo thread alla volta esegua il refresh HTTP
 _refresh_lock   = threading.Lock()
+# Flag per skip immediato se il refresh è già in corso (non-blocking check)
 _refresh_active = threading.Event()
 
 _executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="pve")
@@ -44,6 +45,7 @@ _executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="pve")
 def fix_quorum(node_host: str) -> tuple:
     """
     Esegue pvecm expected 1 via SSH sul nodo indicato.
+    Usato per sbloccare il quorum quando uno o piu nodi del cluster sono offline.
     Restituisce (successo: bool, messaggio: str).
     """
     try:
@@ -78,202 +80,225 @@ def format_uptime(seconds: int) -> str:
 
 class ProxmoxNode:
     def __init__(self, name: str, host: str, port: int = 8006, timeout: int = 8, cluster: dict = None):
+        import requests
         self.name     = name
         self.host     = host
         self.port     = port
         self.timeout  = timeout
+        self.base_url = f"https://{host}:{port}/api2/json"
+        self.ticket      = None
+        self.csrf_token  = None
         self.connected   = False
         self.last_error  = None
+        self.session = requests.Session()
+        self.session.verify = settings.PROXMOX_VERIFY_SSL
         self.cluster = cluster
-        self._proxmox: Optional[ProxmoxAPI] = None
+        _adapter = HTTPAdapter(
+            pool_connections=4,
+            pool_maxsize=10,
+            max_retries=0,
+        )
+        self.session.mount("https://", _adapter)
+        self.session.mount("http://",  _adapter)
 
-    def _build_client(self) -> ProxmoxAPI:
+    def _auth_header(self) -> dict:
         token_name = self.cluster.get("token_name") if self.cluster else None
         token_value = self.cluster.get("token_value") if self.cluster else None
-
-        common = {
-            "verify_ssl": settings.PROXMOX_VERIFY_SSL,
-            "timeout": self.timeout,
-        }
-
         if token_name and token_value:
-            return ProxmoxAPI(
-                self.host,
-                port=self.port,
-                user=settings.PROXMOX_USER,
-                token_name=token_name,
-                token_value=token_value,
-                **common,
-            )
-        return ProxmoxAPI(
-            self.host,
-            port=self.port,
-            user=settings.PROXMOX_USER,
-            password=settings.PROXMOX_PASSWORD,
-            **common,
-        )
+            return {"Authorization":
+                    f"PVEAPIToken={settings.PROXMOX_USER}!"
+                    f"{token_name}={token_value}"}
+        if self.ticket:
+            return {"Cookie": f"PVEAuthCookie={self.ticket}",
+                    "CSRFPreventionToken": self.csrf_token or ""}
+        return {}
 
     def authenticate(self) -> bool:
         try:
-            self._proxmox = self._build_client()
-            self.connected = True
-            self.last_error = None
-            return True
-        except (AuthenticationError, ResourceException) as e:
-            self.last_error = f"Auth failed: {e}"
-            self.connected = False
+            token_name = self.cluster.get("token_name") if self.cluster else None
+            token_value = self.cluster.get("token_value") if self.cluster else None
+            if token_name and token_value:
+                self.connected = True
+                return True
+            resp = self.session.post(
+                f"{self.base_url}/access/ticket",
+                data={"username": settings.PROXMOX_USER,
+                      "password": settings.PROXMOX_PASSWORD},
+                timeout=1
+            )
+            if resp.status_code == 200:
+                data = resp.json()["data"]
+                self.ticket     = data["ticket"]
+                self.csrf_token = data["CSRFPreventionToken"]
+                self.connected  = True
+                self.last_error = None
+                return True
+            self.last_error = f"Auth failed: {resp.status_code}"
+            self.connected  = False
             return False
         except Exception as e:
             self.last_error = str(e)
-            self.connected = False
+            self.connected  = False
             return False
 
-    def _safe_call(self, func):
-        """Wraps a proxmoxer call with error handling and 401 retry."""
+    def _get(self, path: str, params: dict = None) -> Optional[Any]:
         try:
-            return func()
-        except ResourceException as e:
-            if e.status_code == 401:
-                try:
-                    self._proxmox = self._build_client()
-                    return func()
-                except Exception:
-                    self.last_error = str(e)
-                    return None
+            resp = self.session.get(
+                f"{self.base_url}{path}",
+                headers=self._auth_header(),
+                params=params,
+                timeout=self.timeout
+            )
+            if resp.status_code == 401:
+                if self.authenticate():
+                    resp = self.session.get(
+                        f"{self.base_url}{path}",
+                        headers=self._auth_header(),
+                        params=params,
+                        timeout=self.timeout
+                    )
+            if resp.status_code == 200:
+                return resp.json().get("data")
+            return None
+        except Exception as e:
             self.last_error = str(e)
+            return None
+
+    def _post(self, path: str, data: dict = None) -> Optional[Any]:
+        try:
+            headers = self._auth_header()
+            if self.csrf_token and "Cookie" in headers:
+                headers["CSRFPreventionToken"] = self.csrf_token
+            resp = self.session.post(
+                f"{self.base_url}{path}",
+                headers=headers,
+                data=data or {},
+                timeout=15
+            )
+            if resp.status_code == 401:
+                if self.authenticate():
+                    headers = self._auth_header()
+                    if self.csrf_token and "Cookie" in headers:
+                        headers["CSRFPreventionToken"] = self.csrf_token
+                    resp = self.session.post(
+                        f"{self.base_url}{path}",
+                        headers=headers,
+                        data=data or {},
+                        timeout=15
+                    )
+            if resp.status_code in (200, 201, 202):
+                return resp.json().get("data")
+            try:   detail = resp.json()
+            except Exception: detail = resp.text[:300]
+            self.last_error = f"POST {path} failed: {resp.status_code} {detail}"
+            return None
+        except Exception as e:
+            self.last_error = str(e)
+            return None
+
+    def _delete(self, path: str) -> Optional[Any]:
+        try:
+            resp = self.session.delete(
+                f"{self.base_url}{path}",
+                headers=self._auth_header(),
+                timeout=self.timeout
+            )
+            if resp.status_code == 401:
+                if self.authenticate():
+                    resp = self.session.delete(
+                        f"{self.base_url}{path}",
+                        headers=self._auth_header(),
+                        timeout=self.timeout
+                    )
+            if resp.status_code in (200, 202):
+                return resp.json().get("data")
+            try:   detail = resp.json()
+            except Exception: detail = resp.text[:300]
+            self.last_error = f"DELETE {path} failed: {resp.status_code} {detail}"
             return None
         except Exception as e:
             self.last_error = str(e)
             return None
 
     # ── API shortcuts ──────────────────────────────────────────────────────
-    def get_node_status(self)          -> Optional[Dict]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).status.get())
-
-    def get_node_rrd(self, tf="hour")  -> Optional[List]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).rrddata.get(timeframe=tf, cf="AVERAGE"))
-
-    def get_vms(self)                  -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.nodes(self.name).qemu.get())
-        return result or []
-
-    def get_containers(self)           -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.nodes(self.name).lxc.get())
-        return result or []
-
-    def get_vm_status(self, vmid: int) -> Optional[Dict]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).qemu(vmid).status.current.get())
-
-    def get_storage(self)              -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.nodes(self.name).storage.get())
-        return result or []
-
-    def get_tasks(self, limit=50)      -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.nodes(self.name).tasks.get(limit=limit))
-        return result or []
-
-    def get_services(self)             -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.nodes(self.name).services.get())
-        return result or []
-
-    def get_syslog(self, limit=100)    -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.nodes(self.name).syslog.get(limit=limit))
-        return result or []
-
-    def get_network(self)              -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.nodes(self.name).network.get())
-        return result or []
-
-    def get_disks(self)                -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.nodes(self.name).disks.list.get())
-        return result or []
-
-    def get_cluster_resources(self)    -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.cluster.resources.get())
-        return result or []
-
-    def get_cluster_status(self)       -> Dict:
-        result = self._safe_call(lambda: self._proxmox.cluster.status.get())
-        return result or {}
-
-    def get_cluster_ha_status(self)    -> Dict:
-        result = self._safe_call(lambda: self._proxmox.cluster.ha.status.get())
-        return result or {}
-
-    def get_cluster_config(self)       -> Dict:
-        result = self._safe_call(lambda: self._proxmox.cluster.config.get())
-        return result or {}
+    def get_node_status(self)          -> Optional[Dict]: return self._get(f"/nodes/{self.name}/status")
+    def get_node_rrd(self, tf="hour")  -> Optional[List]: return self._get(f"/nodes/{self.name}/rrddata", {"timeframe": tf, "cf": "AVERAGE"})
+    def get_vms(self)                  -> List[Dict]:     return self._get(f"/nodes/{self.name}/qemu") or []
+    def get_containers(self)           -> List[Dict]:     return self._get(f"/nodes/{self.name}/lxc")  or []
+    def get_vm_status(self, vmid: int) -> Optional[Dict]: return self._get(f"/nodes/{self.name}/qemu/{vmid}/status/current")
+    def get_storage(self)              -> List[Dict]:     return self._get(f"/nodes/{self.name}/storage") or []
+    def get_tasks(self, limit=50)      -> List[Dict]:     return self._get(f"/nodes/{self.name}/tasks", {"limit": limit}) or []
+    def get_services(self)           -> List[Dict]:     return self._get(f"/nodes/{self.name}/services") or []
+    def get_syslog(self, limit=100)  -> List[Dict]:     return self._get(f"/nodes/{self.name}/syslog", {"limit": limit}) or []
+    def get_network(self)            -> List[Dict]:     return self._get(f"/nodes/{self.name}/network") or []
+    def get_disks(self)              -> List[Dict]:     return self._get(f"/nodes/{self.name}/disks/list") or []
+    def get_cluster_resources(self)  -> List[Dict]:     return self._get("/cluster/resources") or []
+    
+    def get_cluster_status(self)     -> Dict:         return self._get("/cluster/status") or {}
+    def get_cluster_ha_status(self)   -> Dict:         return self._get("/cluster/ha/status") or {}
+    def get_cluster_config(self)      -> Dict:         return self._get("/cluster/config") or {}
 
     def vm_action(self, vmid: int, action: str) -> Optional[Any]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).qemu(vmid).status(action).post())
+        return self._post(f"/nodes/{self.name}/qemu/{vmid}/status/{action}")
 
     def ct_action(self, vmid: int, action: str) -> Optional[Any]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).lxc(vmid).status(action).post())
+        return self._post(f"/nodes/{self.name}/lxc/{vmid}/status/{action}")
 
     def vm_status(self, vmid: int) -> Optional[Dict]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).qemu(vmid).status.current.get())
+        return self._get(f"/nodes/{self.name}/qemu/{vmid}/status/current")
 
     def ct_status(self, vmid: int) -> Optional[Dict]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).lxc(vmid).status.current.get())
+        return self._get(f"/nodes/{self.name}/lxc/{vmid}/status/current")
 
     def get_snapshots(self, vmid: int, vtype: str = "qemu") -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.nodes(self.name)(vtype)(vmid).snapshot.get())
-        return result or []
+        return self._get(f"/nodes/{self.name}/{vtype}/{vmid}/snapshot") or []
 
     def create_snapshot(self, vmid: int, snapname: str, vtype: str = "qemu", description: str = "") -> Optional[Any]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name)(vtype)(vmid).snapshot.post(
-            snapname=snapname, description=description, vmstate=1
-        ))
+        return self._post(f"/nodes/{self.name}/{vtype}/{vmid}/snapshot", {
+            "snapname": snapname,
+            "description": description,
+            "vmstate": 1
+        })
 
     def delete_snapshot(self, vmid: int, snapname: str, vtype: str = "qemu") -> Optional[Any]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name)(vtype)(vmid).snapshot(snapname).delete.post())
+        return self._post(f"/nodes/{self.name}/{vtype}/{vmid}/snapshot/{snapname}/delete")
 
     def restore_snapshot(self, vmid: int, snapname: str, vtype: str = "qemu", start: bool = False) -> Optional[Any]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name)(vtype)(vmid).snapshot(snapname).rollback.post())
+        return self._post(f"/nodes/{self.name}/{vtype}/{vmid}/snapshot/{snapname}/rollback")
 
     def migrate_vm(self, vmid: int, target: str, online: bool = True) -> Optional[Any]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).qemu(vmid).migrate.post(
-            target=target, online=1 if online else 0
-        ))
+        return self._post(f"/nodes/{self.name}/qemu/{vmid}/migrate", {
+            "target": target,
+            "online": 1 if online else 0
+        })
 
     def migrate_ct(self, vmid: int, target: str, online: bool = True) -> Optional[Any]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).lxc(vmid).migrate.post(
-            target=target, online=1 if online else 0
-        ))
+        return self._post(f"/nodes/{self.name}/lxc/{vmid}/migrate", {
+            "target": target,
+            "online": 1 if online else 0
+        })
 
     def create_backup(self, vmid: int, storage: str, mode: str = "snapshot", vtype: str = "qemu") -> Optional[Any]:
-        return self._safe_call(lambda: self._proxmox.nodes(self.name).vzdump.post(
-            vmid=vmid, storage=storage, mode=mode, compress="zstd", remove=0
-        ))
+        return self._post(f"/nodes/{self.name}/vzdump", {
+            "vmid": vmid,
+            "storage": storage,
+            "mode": mode,
+            "compress": "zstd",
+            "remove": 0
+        })
 
     def get_backup_jobs(self) -> List[Dict]:
-        result = self._safe_call(lambda: self._proxmox.cluster.backup.get())
-        return result or []
+        return self._get("/cluster/backup") or []
 
     def get_backup_logs(self, vmid: Optional[int] = None, limit: int = 50) -> List[Dict]:
-        params = {"limit": limit}
-        if vmid:
-            params["vmid"] = vmid
-        result = self._safe_call(lambda: self._proxmox.cluster.log.get(**params))
-        return result or []
-
+        return self._get("/cluster/log", {"limit": limit}) or []
+    
     def get_pbs_backups(self, vmid: int, storage: str) -> List[Dict]:
-        result = self._safe_call(
-            lambda: self._proxmox.nodes(self.name).storage(storage).content.get(content="backup", vmid=vmid)
-        )
-        return result or []
-
-    def delete_storage_content(self, storage: str, volid: str) -> Optional[Any]:
-        return self._safe_call(
-            lambda: self._proxmox.nodes(self.name).storage(storage).content(volid).delete()
-        )
-
-    def restore_from_backup(self, vmid: int, archive: str, target_storage: str, vtype: str = "qemu") -> Optional[Any]:
-        return self._safe_call(
-            lambda: self._proxmox.nodes(self.name)(vtype).post(
-                vmid=vmid, archive=archive, storage=target_storage, force=1
-            )
-        )
+        try:
+            return self._get(f"/nodes/{self.name}/storage/{storage}/content",
+                            {"content": "backup", "vmid": vmid}) or []
+        except Exception:
+            return []
 
     def fetch_all(self) -> Dict:
         """Fetcha status + vms + containers in parallelo per questo nodo."""
@@ -352,14 +377,18 @@ class ProxmoxCluster:
                 )
 
     def get_active_cluster(self):
+        """Return the active cluster config for token-based auth."""
         return self._active_cluster
 
     def discover_from_cluster(self):
+        """Scopri nodi dal cluster Proxmox via API (autodiscovery)."""
         if not self.nodes:
             return
+        
         first_node = next((n for n in self.nodes.values() if n.connected), None)
         if not first_node:
             return
+        
         try:
             cluster_status = first_node.get_cluster_status()
             if "nodes" in cluster_status:
@@ -367,6 +396,7 @@ class ProxmoxCluster:
                 for node in cluster_status.get("nodes", []):
                     node_name = node.get("node", "")
                     node_ip = node.get("ip", "")
+                    
                     if node_name and node_ip:
                         if node_name not in self.nodes:
                             discovered_nodes[node_name] = ProxmoxNode(
@@ -379,11 +409,12 @@ class ProxmoxCluster:
                             self.nodes[node_name].host = node_ip
                             self.nodes[node_name].connected = True
                             discovered_nodes[node_name] = self.nodes[node_name]
+                
                 if discovered_nodes:
                     self.nodes.update(discovered_nodes)
-                    print(f"Auto-discovered {len(discovered_nodes)} nodes from cluster")
+                    print(f"🔍 Auto-discovered {len(discovered_nodes)} nodes from cluster")
         except Exception as e:
-            print(f"Cluster auto-discovery failed: {e}")
+            print(f"⚠️ Cluster auto-discovery failed: {e}")
 
     def connect_all(self):
         if not self.nodes:
@@ -397,35 +428,19 @@ class ProxmoxCluster:
                 print(f"  Node {name}: connection error ({type(e).__name__})")
                 node.connected = False
 
-    def init_empty_cache(self):
-        """Inizializza la cache con dati offline per tutti i nodi (risposte immediate)."""
-        now = time.time()
-        for name, node in self.nodes.items():
-            if name not in _node_data_cache:
-                _node_data_cache[name] = {
-                    "ts": now,
-                    "name": name,
-                    "host": node.host,
-                    "status": "offline",
-                    "cpu_usage": 0, "mem_used_gb": 0, "mem_total_gb": 0,
-                    "mem_percent": 0, "disk_used_gb": 0, "disk_total_gb": 0,
-                    "disk_percent": 0, "cpu_cores": 0, "uptime": 0,
-                    "uptime_str": "N/A", "vm_count": 0, "ct_count": 0,
-                    "kernel": "", "load_avg": [0, 0, 0],
-                    "error": "Connessione in corso...",
-                    "_vms": [], "_cts": []
-                }
-
     def _refresh_node_data(self) -> None:
+        """
+        Aggiorna la cache dei nodi. Thread-safe: un solo refresh alla volta.
+        Se un altro thread sta già refreshando, aspetta che finisca e ritorna
+        (usa i dati appena aggiornati dall'altro thread).
+        """
         global _node_data_cache, _cluster_summary_cache
 
-        if _refresh_active.is_set():
-            return  # Un refresh è già in corso, non bloccare
-
+        # Non-blocking: se il lock è già preso, aspetta e poi ritorna
+        # (l'altro thread ha già aggiornato la cache)
         if not _refresh_lock.acquire(blocking=True, timeout=30):
-            return
+            return  # timeout di sicurezza
         try:
-            _refresh_active.set()
             now = time.time()
             max_wait = max(n.timeout for n in self.nodes.values()) + 4 if self.nodes else 12
 
@@ -463,28 +478,20 @@ class ProxmoxCluster:
             _node_data_cache = new_cache
             _cluster_summary_cache = {"data": None, "ts": 0}
         finally:
-            _refresh_active.clear()
             _refresh_lock.release()
 
-    def _ensure_fresh(self, async_mode: bool = True) -> None:
-        """Aggiorna la cache se stale. Con async_mode=True (default) non blocca mai."""
+    def _ensure_fresh(self) -> None:
         now = time.time()
-        has_cache = all(name in _node_data_cache for name in self.nodes)
         stale = any(
             name not in _node_data_cache or
             now - _node_data_cache[name].get("ts", 0) > CACHE_TTL
             for name in self.nodes
         )
-        if stale or not has_cache:
-            if _refresh_active.is_set():
-                return  # Refresh già in corso, usa cache esistente
-            if async_mode:
-                # Trigger background refresh — API returns immediately with current cache
-                _executor.submit(self._refresh_node_data)
-            else:
-                self._refresh_node_data()
+        if stale:
+            self._refresh_node_data()
 
     def _cache_is_fresh(self) -> bool:
+        """True se la cache è valida per tutti i nodi."""
         now = time.time()
         return all(
             name in _node_data_cache and
@@ -534,6 +541,8 @@ class ProxmoxCluster:
         return summary
 
     def get_all_vms(self) -> List[Dict]:
+        # Usa _ensure_fresh solo se la cache è davvero stale
+        # (in /api/cluster/all viene chiamata dopo get_cluster_summary che ha già refreshato)
         if not self._cache_is_fresh():
             self._ensure_fresh()
         return [vm for d in _node_data_cache.values() for vm in d.get("_vms", [])]
@@ -690,6 +699,9 @@ class ProxmoxCluster:
         return all_snapshots
 
     def get_cluster_health(self, node_filter: set = None) -> Dict:
+        """Get cluster health status including HA, quorum, and issues.
+        Se node_filter è fornito, considera solo i nodi in quel set.
+        Il quorum è calcolato in base ai nodi effettivamente online dalla cache o dallo stato di connessione."""
         health = {
             "status": "healthy",
             "quorum": False,
@@ -711,17 +723,26 @@ class ProxmoxCluster:
         online_count = 0
         total_count = len(active_nodes)
 
+        print(f"[health] node_filter={node_filter}")
+        print(f"[health] all nodes: {list(self.nodes.keys())}")
+        print(f"[health] active_nodes: {list(active_nodes.keys())}")
+        print(f"[health] cache keys: {list(_node_data_cache.keys())}")
+
         for name, node_obj in active_nodes.items():
             d = _node_data_cache.get(name, {})
             cache_status = d.get("status")
             connected = node_obj.connected
 
+            # Se il nodo è connesso e la cache non lo segna come offline, è online
             if connected and cache_status != "offline":
                 is_online = True
             elif not d:
+                # Nodo non ancora nella cache: usa lo stato di connessione
                 is_online = connected
             else:
                 is_online = cache_status == "online"
+
+            print(f"[health] node={name} connected={connected} cache_status={cache_status} is_online={is_online}")
 
             node_info = {
                 "name": name,
@@ -734,9 +755,13 @@ class ProxmoxCluster:
             if is_online:
                 online_count += 1
 
+        # Quorum richiede MAGGIORANZA STRETTA: più della metà dei nodi devono essere online
+        # Con 3 nodi serve 2+, con 5 serve 3+, con 2 serve 2 (entrambi), con 1 serve 1
         has_quorum = online_count > (total_count / 2.0)
+        print(f"[health] online_count={online_count} total={total_count} quorum={has_quorum}")
         health["quorum"] = has_quorum
 
+        # Raccogli issues solo per nodi OFFLINE nel cluster filtrato
         for node in health["nodes"]:
             if not node["online"]:
                 health["issues"].append({
@@ -768,6 +793,7 @@ class ProxmoxCluster:
         except Exception:
             pass
 
+        # Check disk/memory solo per nodi nel cluster filtrato
         for name, d in _node_data_cache.items():
             if node_filter and name not in node_filter:
                 continue
@@ -795,6 +821,8 @@ class ProxmoxCluster:
                         "node": name
                     })
 
+        # FIX: Determina lo stato solo basandoti su issues/warnings effettivamente nel cluster filtrato
+        # Se tutti i nodi nel cluster sono online e non ci sono problemi di risorse, lo stato è healthy
         if health["issues"]:
             health["status"] = "critical"
         elif health["warnings"]:
@@ -805,6 +833,11 @@ class ProxmoxCluster:
         return health
 
     def get_drs_recommendations(self, node_filter: set = None) -> Dict:
+        """
+        DRS - Distributed Resource Scheduler
+        Calcola raccomandazioni per bilanciamento carico cluster.
+        Se node_filter è fornito, considera solo i nodi in quel set.
+        """
         recommendations = {
             "enabled": False,
             "recommendations": [],
@@ -827,13 +860,13 @@ class ProxmoxCluster:
                 continue
             if d.get("status") != "online":
                 continue
-
+                
             cpu_score = 100 - min(d.get("cpu_usage", 0), 100)
             mem_score = 100 - min(d.get("mem_percent", 0), 100)
             disk_score = 100 - min(d.get("disk_percent", 0), 100)
-
+            
             balance_score = (cpu_score * 0.4) + (mem_score * 0.4) + (disk_score * 0.2)
-
+            
             recommendations["nodes"].append({
                 "name": name,
                 "cpu_usage": d.get("cpu_usage", 0),
@@ -844,20 +877,20 @@ class ProxmoxCluster:
                 "balance_score": round(balance_score, 1),
                 "status": "balanced" if balance_score > 60 else "imbalanced" if balance_score < 40 else "normal"
             })
-
+            
             recommendations["metrics"][name] = {
                 "cpu_score": cpu_score,
                 "mem_score": mem_score,
                 "disk_score": disk_score,
                 "balance_score": balance_score
             }
-
+        
         recommendations["nodes"].sort(key=lambda x: x["balance_score"], reverse=True)
-
+        
         if len(recommendations["nodes"]) >= 2:
             worst = recommendations["nodes"][-1]
             best = recommendations["nodes"][0]
-
+            
             if worst["balance_score"] < 40 and best["balance_score"] > 60:
                 recommendations["recommendations"].append({
                     "type": "rebalance",
@@ -867,7 +900,7 @@ class ProxmoxCluster:
                     "to_node": best["name"],
                     "action": "Migrazione VM da nodo sovraccarico a nodo sottoutilizzato"
                 })
-
+            
             if worst["cpu_usage"] > 80 and best["cpu_usage"] < 40:
                 recommendations["recommendations"].append({
                     "type": "cpu_balance",
@@ -876,7 +909,7 @@ class ProxmoxCluster:
                     "from_node": worst["name"],
                     "to_node": best["name"]
                 })
-
+            
             if worst["mem_percent"] > 85 and best["mem_percent"] < 50:
                 recommendations["recommendations"].append({
                     "type": "memory_balance",
@@ -885,10 +918,12 @@ class ProxmoxCluster:
                     "from_node": worst["name"],
                     "to_node": best["name"]
                 })
-
+        
         return recommendations
 
     def get_vm_placement_suggestion(self, vm_vmid: int = None, vm_type: str = "qemu", node_filter: set = None) -> Dict:
+        """Suggerisce il nodo migliore per una nuova VM o per una VM specifica.
+        Se node_filter è fornito, considera solo i nodi in quel set."""
         suggestions = {
             "current": None,
             "recommended": None,
@@ -928,6 +963,10 @@ class ProxmoxCluster:
         return suggestions
 
     def save_metrics_snapshot(self):
+        """
+        Salva snapshot usando la cache esistente — zero chiamate HTTP.
+        Chiamato DOPO _refresh_node_data, quindi la cache è garantita fresca.
+        """
         try:
             conn = get_db()
             for name, d in _node_data_cache.items():
@@ -964,6 +1003,7 @@ class ProxmoxCluster:
                 pass
 
     def invalidate_cache(self):
+        """Invalida la cache dei nodi (usato dopo power actions)."""
         global _cluster_summary_cache
         for v in _node_data_cache.values():
             v["ts"] = 0
@@ -1067,6 +1107,7 @@ def reload_nodes():
     from database import get_proxmox_nodes, get_proxmox_nodes_with_cluster, get_clusters
     from config import settings
 
+    # Reload cluster configs from DB and settings
     clusters_db = get_clusters()
     cluster._active_cluster = None
     if settings.PROXMOX_CLUSTERS:
@@ -1075,14 +1116,17 @@ def reload_nodes():
     nodes_db = get_proxmox_nodes(enabled_only=True)
     all_nodes = get_proxmox_nodes_with_cluster()
 
+    # Build cluster lookup by id
     cluster_lookup = {}
     for c in clusters_db:
         cluster_lookup[c["id"]] = c
 
+    # Build node→cluster mapping from DB
     node_cluster_map = {}
     for n in all_nodes:
         node_cluster_map[n["name"]] = cluster_lookup.get(n.get("cluster_id"))
 
+    # Ricarica i nodi esistenti
     new_nodes = {}
     for nc in nodes_db:
         name = nc["name"]
@@ -1092,9 +1136,8 @@ def reload_nodes():
             old_node.host = nc["host"]
             old_node.port = nc["port"]
             old_node.timeout = nc["timeout"]
+            old_node.base_url = f"https://{nc['host']}:{nc['port']}/api2/json"
             old_node.cluster = cluster_info
-            old_node.connected = False
-            old_node._proxmox = None
             new_nodes[name] = old_node
         else:
             new_nodes[name] = ProxmoxNode(
@@ -1110,23 +1153,24 @@ def reload_nodes():
             del cluster.nodes[name]
 
     cluster.nodes = new_nodes
-    cluster.init_empty_cache()
     cluster.connect_all()
-    # Il refresh avviene in background tramite metrics_collector
+    cluster._refresh_node_data()
 
 
 def init_cluster_from_db():
-    """Inizializza il cluster leggendo i nodi dal database (senza connetterli)."""
+    """Inizializza il cluster leggendo i nodi dal database."""
     from database import get_proxmox_nodes, get_clusters, init_db
     from config import settings
     init_db()
     nodes_db = get_proxmox_nodes(enabled_only=True)
     clusters_db = get_clusters()
 
+    # Set active cluster from settings
     cluster._active_cluster = None
     if settings.PROXMOX_CLUSTERS:
         cluster._active_cluster = settings.PROXMOX_CLUSTERS[0]
 
+    # Build cluster lookup by id
     cluster_lookup = {}
     for c in clusters_db:
         cluster_lookup[c["id"]] = c
@@ -1143,5 +1187,7 @@ def init_cluster_from_db():
         )
 
     if cluster.nodes:
-        cluster.init_empty_cache()
-        print(f"Loaded {len(cluster.nodes)} nodes from database (connecting in background...)")
+        print(f"📡 Loaded {len(cluster.nodes)} nodes from database")
+        cluster.connect_all()
+        if cluster.nodes:
+            cluster.discover_from_cluster()

@@ -1,10 +1,12 @@
-import { useState, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useApi } from '../hooks/useApi'
+import { useWebSocket } from '../hooks/useWebSocket'
 import { Card, CardHeader, CardBody } from '../components/ui/Card'
 import { FileText, Search, Trash2, Download, Filter, X } from 'lucide-react'
 
 export function Logs() {
   const { data: logsData, refetch } = useApi('/api/logs/realtime', { params: { limit: 200 }, refetchInterval: 10000 })
+  const { subscribe } = useWebSocket()
   
   const [search, setSearch] = useState('')
   const [filterNode, setFilterNode] = useState('')
@@ -12,6 +14,15 @@ export function Logs() {
   const [autoScroll, setAutoScroll] = useState(true)
   
   const logs = logsData?.logs || []
+
+  useEffect(() => {
+    const unsubscribe = subscribe('logs_update', (data) => {
+      if (data && data.length > 0) {
+        refetch()
+      }
+    })
+    return unsubscribe
+  }, [subscribe, refetch])
 
   const allNodes = useMemo(() => {
     return Array.from(new Set(logs.map(log => log.node).filter(Boolean))).sort()

@@ -5,7 +5,8 @@ import { StatusBadge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { useToast } from '../components/ui/Toast'
 import { ConfirmModal, Modal } from '../components/ui/Modal'
-import { Download, Upload, Server, RefreshCw, Search, ChevronUp, ChevronDown, Filter, X, ArrowRight, Layers } from 'lucide-react'
+import { Download, Upload, Server, Cpu, HardDrive, MemoryStick, Clock, RefreshCw, Search, ChevronUp, ChevronDown, Filter, X, ArrowRight, Layers } from 'lucide-react'
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 
 const fmt = {
   bytes: (b) => {
@@ -15,6 +16,7 @@ const fmt = {
     while (b >= 1024 && i < u.length-1) { b /= 1024; i++ }
     return `${b.toFixed(1)} ${u[i]}`
   },
+  pct: (v) => `${(v||0).toFixed(1)}%`,
   uptime: (s) => {
     if (!s) return 'N/A'
     const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60)
@@ -43,7 +45,7 @@ export function Resources() {
     : selectedClusterId
       ? `/api/cluster/all?cluster_id=${selectedClusterId}`
       : '/api/cluster/all'
-  const { data, error, refetch } = useApi(apiEndpoint, { refetchInterval: 60000 })
+  const { data, loading, error, refetch } = useApi(apiEndpoint, { refetchInterval: 60000 })
   const { execute: apiExecute } = useApiAction()
   const toast = useToast()
   

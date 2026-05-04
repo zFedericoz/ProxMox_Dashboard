@@ -4,13 +4,8 @@ import { Card, CardHeader, CardBody } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { Input, Select } from '../components/ui/Input'
 import { useToast } from '../components/ui/Toast'
-<<<<<<< proxmoxAPI
-import { DollarSign, Zap, Save, RefreshCw, AlertTriangle, ChevronUp, ChevronDown, X } from 'lucide-react'
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts'
-=======
 import { DollarSign, Zap, Server, Save, RefreshCw, AlertTriangle, Lightbulb, ChevronUp, ChevronDown, X } from 'lucide-react'
 import { Treemap, ResponsiveContainer, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend } from 'recharts'
->>>>>>> main
 
 const fmt = {
   eur: (v) => `EUR ${(v || 0).toFixed(2)}`

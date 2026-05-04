@@ -15,7 +15,7 @@ const fmt = {
 }
 
 export function Nodes() {
-  const { data: summary } = useApi('/api/cluster/summary', {
+  const { data: summary, loading } = useApi('/api/cluster/summary', {
     refetchInterval: 20000, staleTime: 10000
   })
   const { data: clustersData } = useApi('/api/clusters', {
@@ -91,7 +91,7 @@ export function Nodes() {
       )}
 
       {/* Empty state */}
-      {allNodes.length === 0 && (
+      {allNodes.length === 0 && !loading && (
         <div className="text-center py-16 text-gray-500">
           <Server size={48} className="mx-auto mb-4 opacity-30" />
           <p>Nessun nodo configurato</p>
