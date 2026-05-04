@@ -5,11 +5,76 @@ import { Button } from '../components/ui/Button'
 import { Input, Select } from '../components/ui/Input'
 import { useToast } from '../components/ui/Toast'
 import { DollarSign, Zap, Server, Save, RefreshCw, AlertTriangle, Lightbulb, ChevronUp, ChevronDown, X } from 'lucide-react'
-import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts'
+import { Treemap, ResponsiveContainer, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend } from 'recharts'
 
 const fmt = {
   eur: (v) => `EUR ${(v || 0).toFixed(2)}`
 }
+
+function CustomTreemapContent(props) {
+  const { x, y, width, height, name, value, index, depth } = props
+  
+  if (depth === 0 || width < 40 || height < 30) return null
+  
+  const totalMonthly = calculationsRef.current?.totalMonthly || 1
+  const pct = ((value / totalMonthly) * 100).toFixed(1)
+  
+  return (
+    <g>
+      <rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        style={{
+          fill: COLORS[index % COLORS.length],
+          stroke: '#1f2937',
+          strokeWidth: 2,
+          strokeOpacity: 1,
+          fillOpacity: 0.85,
+        }}
+      />
+      {width > 60 && height > 45 && (
+        <>
+          <text
+            x={x + width / 2}
+            y={y + height / 2 - 10}
+            textAnchor="middle"
+            fontFamily="'Inter', system-ui, sans-serif"
+            fill="#ffffff"
+            fontSize={12}
+          >
+            {name}
+          </text>
+          <text
+            x={x + width / 2}
+            y={y + height / 2 + 8}
+            textAnchor="middle"
+            fontFamily="'Inter', system-ui, sans-serif"
+            fill="#ffffff"
+            fontSize={11}
+          >
+            {fmt.eur(value)}
+          </text>
+          <text
+            x={x + width / 2}
+            y={y + height / 2 + 24}
+            textAnchor="middle"
+            fontFamily="'Inter', system-ui, sans-serif"
+            fill="rgba(255,255,255,0.75)"
+            fontSize={10}
+          >
+            {pct}%
+          </text>
+        </>
+      )}
+    </g>
+  )
+}
+
+let calculationsRef = { current: null }
+
+const COLORS = ['#22d3ee', '#a855f7', '#f59e0b', '#10b981', '#3b82f6', '#ec4899']
 
 export function Budget() {
   const toast = useToast()
@@ -167,6 +232,20 @@ export function Budget() {
       nodeCosts,
       zoneCosts
     })
+    calculationsRef.current = {
+      electricityCostPerNode,
+      coolingCost,
+      subscriptionCost,
+      amortizationCost,
+      connectivityCost,
+      backupCost,
+      totalMonthly,
+      budgetRemaining,
+      budgetUsedPct,
+      pieData,
+      nodeCosts,
+      zoneCosts
+    }
   }
 
   const saveConfig = async () => {
@@ -184,8 +263,6 @@ export function Budget() {
   useEffect(() => {
     calculate()
   }, [config, nodes])
-
-  const COLORS = ['#22d3ee', '#a855f7', '#f59e0b', '#10b981', '#3b82f6', '#ec4899']
 
   const tips = []
   if (calculations && calculations.budgetUsedPct > 80) {
@@ -303,23 +380,32 @@ export function Budget() {
               <CardBody>
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={calculations.pieData}
-                        dataKey="value"
-                        nameKey="name"
-                        cx="50%"
-                        cy="50%"
-                        outerRadius={80}
-                        label={({ name, percent }) => `${(percent * 100).toFixed(0)}%`}
-                      >
-                        {calculations.pieData.map((entry, index) => (
-                          <Cell key={index} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value) => fmt.eur(value)} />
-                    </PieChart>
+                    <Treemap
+                      data={[...calculations.pieData].sort((a, b) => b.value - a.value)}
+                      dataKey="value"
+                      aspectRatio={4 / 3}
+                      stroke="#1f2937"
+                      strokeWidth={2}
+                      animationDuration={0}
+                      content={<CustomTreemapContent />}
+                    >
+                      <Tooltip
+                        contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px' }}
+                        labelStyle={{ color: '#fff' }}
+                        itemStyle={{ color: '#fff' }}
+                        formatter={(value) => [fmt.eur(value), 'Costo']}
+                      />
+                    </Treemap>
                   </ResponsiveContainer>
+                </div>
+                <div className="flex flex-wrap gap-4 mt-3 px-2">
+                  {[...calculations.pieData].sort((a, b) => b.value - a.value).map((entry, index) => (
+                    <div key={index} className="flex items-center gap-2 text-xs">
+                      <div className="w-3 h-3 rounded" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                      <span className="text-gray-400">{entry.name}</span>
+                      <span className="text-gray-200 font-mono">{fmt.eur(entry.value)}</span>
+                    </div>
+                  ))}
                 </div>
               </CardBody>
             </Card>
