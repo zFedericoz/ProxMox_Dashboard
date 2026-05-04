@@ -42,6 +42,10 @@ function CustomTreemapContent(props) {
             textAnchor="middle"
             fontFamily="'Inter', system-ui, sans-serif"
             fill="#ffffff"
+            stroke="#000000"
+            strokeWidth={2}
+            strokeLinejoin="round"
+            paintOrder="stroke fill"
             fontSize={12}
           >
             {name}
@@ -52,6 +56,10 @@ function CustomTreemapContent(props) {
             textAnchor="middle"
             fontFamily="'Inter', system-ui, sans-serif"
             fill="#ffffff"
+            stroke="#000000"
+            strokeWidth={2}
+            strokeLinejoin="round"
+            paintOrder="stroke fill"
             fontSize={11}
           >
             {fmt.eur(value)}
@@ -61,7 +69,11 @@ function CustomTreemapContent(props) {
             y={y + height / 2 + 24}
             textAnchor="middle"
             fontFamily="'Inter', system-ui, sans-serif"
-            fill="rgba(255,255,255,0.75)"
+            fill="#ffffff"
+            stroke="#000000"
+            strokeWidth={2}
+            strokeLinejoin="round"
+            paintOrder="stroke fill"
             fontSize={10}
           >
             {pct}%
