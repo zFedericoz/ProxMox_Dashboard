@@ -124,7 +124,7 @@
 
 ---
 
-## 7. Criteri di superamento e registrazione esiti
+## 4. Criteri di superamento e registrazione esiti
 
 - **Superato:** risposta HTTP coerente con la specifica dell’endpoint, assenza di crash del processo backend, per il caso PBS irraggiungibile presenza di **warning** o lista vuota senza errore fatale.
 - **Fallito:** eccezione non gestita che termina il worker, risposta sempre `500` senza messaggio per errori di storage attesi, credenziali sensibili esposte in repository.
@@ -137,7 +137,7 @@
 
 ---
 
-## 8. Riferimenti rapidi endpoint principali
+## 5. Riferimenti rapidi endpoint principali
 
 ```
 GET  /api/health
